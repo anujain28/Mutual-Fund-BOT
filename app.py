@@ -238,8 +238,8 @@ def render_sidebar():
     st.sidebar.title("⚙️ Settings & Links")
 
     # Stocks app link
-    st.sidebar.markdown("### 🔗 Other Tools")
-    st.sidebar.markdown("[📈 Open Stocks Analysis App](https://airobots.streamlit.app/)")
+    st.sidebar.markdown("### 🔗 Stocks")
+    st.sidebar.markdown("[📈 Open Stocks AI Bot](https://airobots.streamlit.app/)")
     st.sidebar.markdown("---")
 
     # Load config into state
@@ -1039,3 +1039,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
