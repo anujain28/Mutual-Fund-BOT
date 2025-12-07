@@ -19,6 +19,49 @@ st.set_page_config(
     layout="wide",
 )
 
+# --- Global styles, including black table --- #
+st.markdown(
+    """
+<style>
+/* Black styled table for projections and any custom HTML tables */
+.dark-table {
+    width: 100%;
+    border-collapse: collapse;
+    background-color: #020617;
+    color: #f9fafb;
+    border-radius: 12px;
+    overflow: hidden;
+    margin-top: 8px;
+    margin-bottom: 12px;
+}
+.dark-table th, .dark-table td {
+    padding: 8px 10px;
+    border: 1px solid #1f2937;
+    font-size: 0.85rem;
+}
+.dark-table th {
+    background-color: #111827;
+    font-weight: 600;
+    text-align: left;
+}
+
+/* Darken dataframes */
+div[data-testid="stDataFrame"] table {
+    background-color: #020617 !important;
+    color: #f9fafb !important;
+}
+div[data-testid="stDataFrame"] th,
+div[data-testid="stDataFrame"] td {
+    background-color: #020617 !important;
+    color: #f9fafb !important;
+    border-color: #1f2937 !important;
+    font-size: 0.85rem !important;
+}
+</style>
+""",
+    unsafe_allow_html=True,
+)
+
 IST = pytz.timezone("Asia/Kolkata")
 
 CONFIG_FILE = "config.json"
@@ -223,27 +266,38 @@ def load_portfolio_file(uploaded_file: st.runtime.uploaded_file_manager.Uploaded
 def auto_map_columns(df: pd.DataFrame) -> Dict[str, Optional[str]]:
     cols = list(df.columns)
 
-    def find_col(candidates):
+    def find_col_by_keywords(keywords):
         for c in cols:
             low = str(c).lower()
-            if any(k in low for k in candidates):
+            if any(k in low for k in keywords):
                 return c
         return None
 
     mapping = {
-        "scheme": find_col(["scheme name", "fund name", "scheme", "plan name"]),
-        "category": find_col(["category"]),
-        "subcategory": find_col(["sub category", "sub-category", "subcategory", "sub cat"]),
-        "invested": find_col(["investment", "cost value", "purchase amount", "amount invested", "inv amount", "purchase cost"]),
-        "current": find_col(["current value", "current amount", "market value", "value (₹)", "value (rs)"]),
-        "xirr": find_col(["xirr"]),
-        "dividend": find_col(["dividend yield", "dividend (%)", "dividend %"]),
+        "scheme": find_col_by_keywords(["scheme name", "fund name", "scheme", "plan name"]),
+        "category": find_col_by_keywords(["category"]),
+        "subcategory": find_col_by_keywords(["sub category", "sub-category", "subcategory", "sub cat"]),
+        "invested": find_col_by_keywords(
+            ["invested", "investment", "cost value", "purchase amount", "amount invested", "inv amount",
+             "purchase cost", "total investment"]
+        ),
+        "current": find_col_by_keywords(
+            ["current value", "current", "market value", "value (₹)", "value (rs)", "current value (rs)", "current amount"]
+        ),
+        "xirr": find_col_by_keywords(["xirr"]),
+        "dividend": find_col_by_keywords(["dividend yield", "dividend (%)", "dividend %"]),
     }
 
     if mapping["scheme"] is None:
         st.error("Could not auto-detect 'Scheme Name' column. Please ensure it contains text like 'Scheme Name' or 'Fund Name'.")
         st.write("Detected columns:", cols)
         return mapping
+
+    if mapping["invested"] is None:
+        st.warning("⚠️ Could not detect Invested Amount column. Will treat Invested (₹) as 0 unless found.")
+
+    if mapping["current"] is None:
+        st.warning("⚠️ Could not detect Current Value column. Will treat Current Value (₹) as 0 unless found.")
 
     return mapping
 
@@ -305,24 +359,25 @@ def enhance_xirr_with_online_data(df_norm: pd.DataFrame) -> pd.DataFrame:
         df_norm["XIRR (%)"] = np.nan
 
     needs_idx = df_norm.index[df_norm["XIRR (%)"].isna()].tolist()
-    if not needs_idx:
-        return df_norm
+    if needs_idx:
+        st.info("🔍 Fetching XIRR online from mfapi.in for schemes missing XIRR (approximate CAGR-style XIRR).")
+        cache: Dict[str, Optional[float]] = {}
+        prog = st.progress(0.0)
+        for i, idx in enumerate(needs_idx):
+            name = str(df_norm.at[idx, "Scheme Name"])
+            key = name.upper()
+            if key in cache:
+                xirr_val = cache[key]
+            else:
+                xirr_val = fetch_scheme_xirr_from_mfapi_by_name(name)
+                cache[key] = xirr_val
+            if xirr_val is not None:
+                df_norm.at[idx, "XIRR (%)"] = xirr_val
+            prog.progress((i + 1) / len(needs_idx))
+        prog.empty()
 
-    st.info("🔍 Fetching XIRR online from mfapi.in for schemes missing XIRR. (Approximate CAGR-style XIRR)")
-    cache: Dict[str, Optional[float]] = {}
-    prog = st.progress(0.0)
-    for i, idx in enumerate(needs_idx):
-        name = str(df_norm.at[idx, "Scheme Name"])
-        key = name.upper()
-        if key in cache:
-            xirr_val = cache[key]
-        else:
-            xirr_val = fetch_scheme_xirr_from_mfapi_by_name(name)
-            cache[key] = xirr_val
-        if xirr_val is not None:
-            df_norm.at[idx, "XIRR (%)"] = xirr_val
-        prog.progress((i + 1) / len(needs_idx))
-    prog.empty()
+    # If still NaN, assume 8% as default XIRR
+    df_norm["XIRR (%)"] = df_norm["XIRR (%)"].fillna(8.0)
     return df_norm
 
 
@@ -338,7 +393,10 @@ def classify_bucket(category: str, subcat: str, xirr: float, pnl_pct: float, sch
     is_index = "index" in cat_lower or "index" in sub_lower or "nifty" in name_lower or "sensex" in name_lower
     is_large = "large" in cat_lower or "large cap" in sub_lower or "bluechip" in sub_lower
     is_smallmid = any(k in (cat_lower + sub_lower) for k in ["small", "mid"])
-    is_thematic = any(k in (cat_lower + sub_lower) for k in ["sector", "theme", "thematic", "psu", "banking", "infra", "pharma", "energy", "auto", "technology", "digital", "gold", "it"])
+    is_thematic = any(k in (cat_lower + sub_lower) for k in [
+        "sector", "theme", "thematic", "psu", "banking", "infra", "pharma",
+        "energy", "auto", "technology", "digital", "gold", "it"
+    ])
 
     if np.isnan(xirr):
         xirr = 8.0
@@ -463,7 +521,7 @@ def compute_ai_score(row: pd.Series) -> float:
     elif bucket == "Exit":
         score -= 10
 
-    return float(max(0.0, min(100.0, score)))
+    return float(round(max(0.0, min(100.0, score)), 1))
 
 
 def build_normalised_df(df_raw: pd.DataFrame, mapping: Dict[str, Optional[str]]) -> pd.DataFrame:
@@ -484,7 +542,7 @@ def build_normalised_df(df_raw: pd.DataFrame, mapping: Dict[str, Optional[str]])
         else "Unknown"
     )
 
-    # Invested & Current values
+    # Invested & Current values (₹)
     if mapping.get("invested") and mapping["invested"] in df_raw.columns:
         invested = pd.to_numeric(df_raw[mapping["invested"]], errors="coerce").fillna(0.0)
     else:
@@ -503,6 +561,7 @@ def build_normalised_df(df_raw: pd.DataFrame, mapping: Dict[str, Optional[str]])
         (out["P&L (₹)"] / out["Invested (₹)"]) * 100.0,
         np.nan,
     )
+    out["P&L (%)"] = out["P&L (%)"].round(1)
 
     # XIRR from file if present
     if mapping.get("xirr") and mapping["xirr"] in df_raw.columns:
@@ -514,12 +573,13 @@ def build_normalised_df(df_raw: pd.DataFrame, mapping: Dict[str, Optional[str]])
     # Dividend Yield
     if mapping.get("dividend") and mapping["dividend"] in df_raw.columns:
         divy = pd.to_numeric(df_raw[mapping["dividend"]], errors="coerce").fillna(0.0)
-        out["Dividend Yield (%)"] = divy
+        out["Dividend Yield (%)"] = divy.round(2)
     else:
         out["Dividend Yield (%)"] = 0.0
 
-    # Enhance XIRR from internet when missing
+    # Enhance XIRR from internet when missing, then fill with 8%
     out = enhance_xirr_with_online_data(out)
+    out["XIRR (%)"] = out["XIRR (%)"].round(1)
 
     # Buckets & AI fields
     buckets = []
@@ -540,7 +600,9 @@ def build_normalised_df(df_raw: pd.DataFrame, mapping: Dict[str, Optional[str]])
         tgt, horizon = target_year_and_horizon(bucket)
         reco = recommendation_from_bucket(bucket)
         reason = bucket_reason(r)
-        score = compute_ai_score(pd.Series({**r.to_dict(), "Bucket": bucket}))
+        temp_row = r.to_dict()
+        temp_row["Bucket"] = bucket
+        score = compute_ai_score(pd.Series(temp_row))
 
         buckets.append(bucket)
         tgt_years.append(tgt)
@@ -599,40 +661,73 @@ def portfolio_snapshot(df_norm: pd.DataFrame):
     total_pnl = total_curr - total_inv
     pnl_pct = (total_pnl / total_inv * 100.0) if total_inv > 0 else np.nan
 
-    # Weighted XIRR (approx)
-    if "XIRR (%)" in df_norm.columns:
-        xirr_series = df_norm["XIRR (%)"].dropna()
-        if not xirr_series.empty and total_inv > 0:
-            weights = df_norm.loc[xirr_series.index, "Invested (₹)"]
+    # Weighted XIRR (approx). If missing, assume 8%.
+    if "XIRR (%)" in df_norm.columns and not df_norm["XIRR (%)"].isna().all():
+        xirr_series = df_norm["XIRR (%)"].fillna(8.0)
+        if total_inv > 0:
+            weights = df_norm["Invested (₹)"]
             if weights.sum() > 0:
                 weights = weights / weights.sum()
                 portfolio_xirr = float((xirr_series * weights).sum())
             else:
-                portfolio_xirr = np.nan
+                portfolio_xirr = 8.0
         else:
-            portfolio_xirr = np.nan
+            portfolio_xirr = 8.0
     else:
-        portfolio_xirr = np.nan
+        portfolio_xirr = 8.0  # default XIRR if not found anywhere
 
     c1, c2, c3, c4 = st.columns(4)
     with c1:
-        st.metric("Total Investment", f"₹{total_inv:,.0f}")
+        st.metric("Total Investment (₹)", f"₹{total_inv:,.0f}")
     with c2:
-        st.metric("Current Value", f"₹{total_curr:,.0f}")
+        st.metric("Current Value (₹)", f"₹{total_curr:,.0f}")
     with c3:
         if not pd.isna(pnl_pct):
-            st.metric("Total P&L", f"₹{total_pnl:,.0f}", f"{pnl_pct:.1f}%")
+            st.metric("Total P&L (₹)", f"₹{total_pnl:,.0f}", f"{pnl_pct:.1f}%")
         else:
-            st.metric("Total P&L", f"₹{total_pnl:,.0f}")
+            st.metric("Total P&L (₹)", f"₹{total_pnl:,.0f}")
     with c4:
-        if not pd.isna(portfolio_xirr):
-            st.metric("Portfolio XIRR (approx)", f"{portfolio_xirr:.1f}% p.a.")
-        else:
-            st.metric("Portfolio XIRR (approx)", "N/A")
+        st.metric("Portfolio XIRR (approx)", f"{portfolio_xirr:.1f}% p.a.")
+
+    return total_curr, portfolio_xirr
+
+
+def show_projection_table(current_value: float, portfolio_xirr: float):
+    st.markdown("### 🔮 Portfolio Projections (INR)")
+
+    if current_value <= 0:
+        st.info("Not enough data to compute projections (current value is 0).")
+        return
+
+    # If XIRR somehow NaN, assume 8%
+    if pd.isna(portfolio_xirr):
+        portfolio_xirr = 8.0
+
+    rate = portfolio_xirr / 100.0
+    years_list = [5, 10, 15, 20]
+    rows = []
+    for y in years_list:
+        fv = current_value * ((1 + rate) ** y)
+        gain = fv - current_value
+        rows.append(
+            {
+                "Years": y,
+                "Current Value (₹)": f"₹{current_value:,.0f}",
+                "Projected Value (₹)": f"₹{fv:,.0f}",
+                "Gain (₹)": f"₹{gain:,.0f}",
+            }
+        )
+
+    df_proj = pd.DataFrame(rows)
+    st.markdown(
+        df_proj.to_html(classes="dark-table", index=False, escape=False),
+        unsafe_allow_html=True,
+    )
+    st.caption(f"Projection uses portfolio XIRR ≈ {portfolio_xirr:.1f}% p.a. (if XIRR was missing, 8% was assumed).")
 
 
 def show_bucket_tables(df_norm: pd.DataFrame):
-    st.markdown("### 🧠 AI Buckets & Plans (Sub Category hidden)")
+    st.markdown("### 🧠 AI Buckets & Plans (Sub Category hidden, all values in ₹)")
 
     # Display columns: Recommendation second column, no Sub Category
     display_cols = [
@@ -679,7 +774,7 @@ def show_bucket_tables(df_norm: pd.DataFrame):
 
 
 def show_category_allocation(df_norm: pd.DataFrame):
-    st.markdown("### 🧩 Category Allocation (by Current Value)")
+    st.markdown("### 🧩 Category Allocation (by Current Value in ₹)")
     if "Category" not in df_norm.columns:
         st.info("Category column not present.")
         return
@@ -700,7 +795,7 @@ def show_category_allocation(df_norm: pd.DataFrame):
 
 
 def show_full_table(df_norm: pd.DataFrame):
-    st.markdown("### 📋 Full Normalised Table (Sub Category hidden)")
+    st.markdown("### 📋 Full Normalised Table (₹ values)")
 
     display_cols = [
         "Scheme Name",
@@ -725,7 +820,7 @@ def show_full_table(df_norm: pd.DataFrame):
 
 
 def show_top10_scanner(df_norm: Optional[pd.DataFrame]):
-    st.markdown("### 🏆 Top 10 Mutual Funds (AI Scanner on Your Portfolio)")
+    st.markdown("### 🏆 Top 10 Mutual Funds (AI Scanner on Your Portfolio – ₹ values)")
     if df_norm is None or df_norm.empty:
         st.info("Upload your portfolio file in the main section to see AI-ranked Top 10 funds from your holdings.")
         return
@@ -754,7 +849,7 @@ def show_top10_scanner(df_norm: Optional[pd.DataFrame]):
 
     st.dataframe(df[display_cols], use_container_width=True, hide_index=True)
 
-    st.caption("⚠️ This scanner ranks funds *within your portfolio* based on AI-style scoring: XIRR, P&L, category type and long-term role (core vs satellite).")
+    st.caption("⚠️ This scanner ranks funds *within your portfolio* based on AI-style scoring: XIRR, P&L, category type and long-term role (core vs satellite). All values are in ₹ where applicable.")
 
 
 def show_nfo_tab():
@@ -768,7 +863,7 @@ def show_nfo_tab():
         st.warning("Could not automatically fetch NFO data right now.")
         st.markdown(
             """
-You can check the latest New Fund Offers here:
+You can check the latest New Fund Offers here (values in ₹ as per their sites):
 
 - AMFI NFO list  
 - ValueResearch New Fund Offers  
@@ -798,7 +893,7 @@ def main():
         unsafe_allow_html=True,
     )
 
-    st.markdown("### 📁 Upload Mutual Fund Portfolio")
+    st.markdown("### 📁 Upload Mutual Fund Portfolio (values in ₹)")
 
     uploaded = st.file_uploader("Upload portfolio export (CSV / Excel)", type=["csv", "xls", "xlsx"])
     df_raw = None
@@ -818,25 +913,35 @@ def main():
         else:
             st.stop()
 
-    # Tabs always visible; behaviour depends on whether df_norm is ready
-    tab1, tab2, tab3 = st.tabs(["📊 Portfolio Overview", "🏆 AI Top 10 Scanner", "🆕 NFO Radar"])
+    # Tabs: portfolio = only present + future; recos in separate tab
+    tab1, tab2, tab3, tab4 = st.tabs([
+        "📊 Portfolio Overview",
+        "🤖 AI Recommendations",
+        "🏆 AI Top 10 Scanner",
+        "🆕 NFO Radar",
+    ])
 
     with tab1:
         if df_norm is None or df_norm.empty:
-            st.info("Upload your mutual fund portfolio file above to see detailed AI analysis here.")
+            st.info("Upload your mutual fund portfolio file above to see present and future portfolio value here.")
         else:
-            portfolio_snapshot(df_norm)
-            st.markdown("---")
+            current_val, port_xirr = portfolio_snapshot(df_norm)
+            show_projection_table(current_val, port_xirr)
+
+    with tab2:
+        if df_norm is None or df_norm.empty:
+            st.info("Upload your portfolio to see AI-based recommendations, buckets, and detailed tables.")
+        else:
             show_bucket_tables(df_norm)
             st.markdown("---")
             show_category_allocation(df_norm)
             st.markdown("---")
             show_full_table(df_norm)
 
-    with tab2:
+    with tab3:
         show_top10_scanner(df_norm)
 
-    with tab3:
+    with tab4:
         show_nfo_tab()
 
     # Telegram: manual send
