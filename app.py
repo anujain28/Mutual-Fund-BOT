@@ -475,6 +475,20 @@ def target_year_and_horizon(bucket: str):
     return 2026, "0–3 years / Review"
 
 
+def horizon_years_from_bucket(bucket: str) -> int:
+    if bucket == "Super Core":
+        return 20
+    if bucket == "Core":
+        return 12
+    if bucket == "Satellite":
+        return 8
+    if bucket == "Medium":
+        return 6
+    if bucket == "Exit":
+        return 3
+    return 3  # Weak / others
+
+
 def recommendation_from_bucket(bucket: str) -> str:
     if bucket == "Super Core":
         return "BUY & HOLD 20+ yrs"
@@ -763,84 +777,82 @@ def show_category_allocation(df_norm: pd.DataFrame):
     st.dataframe(grp, use_container_width=True, hide_index=True)
 
 
+# --------- Simple 5-column AI tables helpers --------- #
+
+def build_simple_ai_table(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Returns a 5-column simplified table:
+    Scheme Name, XIRR (%), Total Investment, Recommended Duration, Expected Profit
+    Total Investment & Expected Profit formatted in K / L / Cr.
+    """
+    if df is None or df.empty:
+        return pd.DataFrame()
+
+    rows = []
+    for _, r in df.iterrows():
+        name = r.get("Scheme Name", "")
+        xirr = r.get("XIRR (%)", np.nan)
+        bucket = r.get("Bucket", "")
+        horizon_text = r.get("Suggested Horizon", "")
+        if not horizon_text:
+            # fallback from bucket
+            _, horizon_text = target_year_and_horizon(bucket)
+
+        # Use Current Value as deployable capital
+        curr_val = float(r.get("Current Value (₹)", 0.0) or 0.0)
+
+        # Horizon in years from bucket
+        years = horizon_years_from_bucket(bucket)
+        rate = (xirr if not pd.isna(xirr) else 8.0) / 100.0
+
+        future_val = curr_val * ((1 + rate) ** years)
+        expected_profit = future_val - curr_val
+
+        rows.append(
+            {
+                "Scheme Name": name,
+                "XIRR (%)": f"{(xirr if not pd.isna(xirr) else 8.0):.1f}%",
+                "Total Investment": format_inr_compact(curr_val),
+                "Recommended Duration": horizon_text,
+                "Expected Profit": format_inr_compact(expected_profit),
+            }
+        )
+
+    return pd.DataFrame(rows)
+
+
 def show_keep_table(df_norm: pd.DataFrame):
-    st.markdown("### ✅ Keep / Hold Bucket (Super Core, Core, Satellite, Medium)")
+    st.markdown("### ✅ Keep / Hold (Super Core, Core, Satellite, Medium)")
 
     keep_df = df_norm[df_norm["Bucket"].isin(["Super Core", "Core", "Satellite", "Medium"])]
     if keep_df.empty:
-        st.info("No funds classified as Keep yet.")
+        st.info("No funds classified as Keep / Hold yet.")
         return
 
-    display_cols = [
-        "Scheme Name",
-        "Recommendation",
-        "Category",
-        "Bucket",
-        "Target Year",
-        "Suggested Horizon",
-        "Invested (₹)",
-        "Current Value (₹)",
-        "P&L (₹)",
-        "P&L (%)",
-        "XIRR (%)",
-        "Dividend Yield (%)",
-        "AI Score",
-    ]
-    display_cols = [c for c in display_cols if c in keep_df.columns]
-    st.dataframe(keep_df[display_cols], use_container_width=True, hide_index=True)
+    simple = build_simple_ai_table(keep_df)
+    st.dataframe(simple, use_container_width=True, hide_index=True)
 
 
 def show_sell_table(df_norm: pd.DataFrame):
-    st.markdown("### ⚠️ Sell / Review Bucket (Weak + Exit)")
+    st.markdown("### ⚠️ Sell / Review (Weak + Exit)")
 
     sell_df = df_norm[df_norm["Bucket"].isin(["Weak", "Exit"])]
     if sell_df.empty:
         st.info("No funds in Sell / Review bucket. Good going! 😄")
         return
 
-    display_cols = [
-        "Scheme Name",
-        "Recommendation",
-        "Category",
-        "Bucket",
-        "Target Year",
-        "Suggested Horizon",
-        "Invested (₹)",
-        "Current Value (₹)",
-        "P&L (₹)",
-        "P&L (%)",
-        "XIRR (%)",
-        "Dividend Yield (%)",
-        "Bucket Reason",
-        "AI Score",
-    ]
-    display_cols = [c for c in display_cols if c in sell_df.columns]
-    st.dataframe(sell_df[display_cols], use_container_width=True, hide_index=True)
+    simple = build_simple_ai_table(sell_df)
+    st.dataframe(simple, use_container_width=True, hide_index=True)
 
 
 def show_full_table(df_norm: pd.DataFrame):
-    st.markdown("### 📋 Full Normalised Table (₹ values)")
+    st.markdown("### 📋 Full Portfolio (AI View – 5 Columns)")
 
-    display_cols = [
-        "Scheme Name",
-        "Recommendation",
-        "Category",
-        "Target Year",
-        "Bucket",
-        "Suggested Horizon",
-        "Invested (₹)",
-        "Current Value (₹)",
-        "P&L (₹)",
-        "P&L (%)",
-        "XIRR (%)",
-        "Dividend Yield (%)",
-        "Bucket Reason",
-        "AI Score",
-    ]
-    display_cols = [c for c in display_cols if c in df_norm.columns]
-
-    df_show = df_norm[display_cols].copy()
-    st.dataframe(df_show, use_container_width=True, hide_index=True)
+    simple = build_simple_ai_table(df_norm)
+    if simple.empty:
+        st.info("No data to show. Upload portfolio above.")
+    else:
+        st.dataframe(simple, use_container_width=True, hide_index=True)
 
 
 def show_top6_max_profit(df_norm: pd.DataFrame):
@@ -861,21 +873,8 @@ def show_top6_max_profit(df_norm: pd.DataFrame):
         st.info("Not enough data to pick Top 6 funds.")
         return
 
-    display_cols = [
-        "Scheme Name",
-        "Recommendation",
-        "Bucket",
-        "Category",
-        "Target Year",
-        "Suggested Horizon",
-        "XIRR (%)",
-        "P&L (%)",
-        "AI Score",
-        "Invested (₹)",
-        "Current Value (₹)",
-    ]
-    display_cols = [c for c in display_cols if c in df_sorted.columns]
-    st.dataframe(df_sorted[display_cols], use_container_width=True, hide_index=True)
+    simple = build_simple_ai_table(df_sorted)
+    st.dataframe(simple, use_container_width=True, hide_index=True)
 
     # Hypothetical scenario: move all current portfolio value into these 6 funds
     total_curr = float(df_norm["Current Value (₹)"].sum())
@@ -916,7 +915,7 @@ def show_top6_max_profit(df_norm: pd.DataFrame):
         df_comp.to_html(classes="dark-table", index=False, escape=False),
         unsafe_allow_html=True,
     )
-    st.caption("This is a rough, AI-style scenario comparison based purely on XIRR and AI scores, not financial advice.")
+    st.caption("This is a rough AI-style scenario comparison based purely on XIRR and AI scores, not financial advice.")
 
 
 def show_top10_scanner(df_norm: Optional[pd.DataFrame]):
@@ -932,24 +931,11 @@ def show_top10_scanner(df_norm: Optional[pd.DataFrame]):
     df["scanner_score"] = df["AI Score"] + df["bucket_weight"] * 3.0
     df = df.sort_values("scanner_score", ascending=False).head(10)
 
-    display_cols = [
-        "Scheme Name",
-        "Recommendation",  # second column
-        "Bucket",
-        "Target Year",
-        "XIRR (%)",
-        "P&L (%)",
-        "AI Score",
-        "Category",
-        "Suggested Horizon",
-        "Invested (₹)",
-        "Current Value (₹)",
-    ]
-    display_cols = [c for c in display_cols if c in df.columns]
+    # also show in compact 5-col format to be consistent?
+    simple = build_simple_ai_table(df)
+    st.dataframe(simple, use_container_width=True, hide_index=True)
 
-    st.dataframe(df[display_cols], use_container_width=True, hide_index=True)
-
-    st.caption("⚠️ This scanner ranks funds *within your portfolio* based on AI-style scoring: XIRR, P&L, category type and long-term role (core vs satellite). All values are in ₹ where applicable.")
+    st.caption("⚠️ This scanner ranks funds *within your portfolio* based on AI-style scoring: XIRR, category role and score. Amounts are shown in compact INR (K / L / Cr).")
 
 
 # ==========================
@@ -991,7 +977,7 @@ def main():
         else:
             st.stop()
 
-    # Tabs: portfolio = only present + future; recos in separate tab
+    # Tabs
     tab1, tab2, tab3 = st.tabs([
         "📊 Portfolio Overview",
         "🤖 AI Recommendations",
@@ -1009,22 +995,19 @@ def main():
 
     with tab2:
         if df_norm is None or df_norm.empty:
-            st.info("Upload your portfolio to see AI-based recommendations, buckets, and detailed tables.")
+            st.info("Upload your portfolio to see AI-based recommendations and simplified tables.")
         else:
-            sub1, sub2, sub3, sub4 = st.tabs([
-                "✅ Keep",
-                "⚠️ Sell / Review",
-                "📋 Full Table",
-                "💰 Top 6 (Max Profit)",
-            ])
-            with sub1:
-                show_keep_table(df_norm)
-            with sub2:
-                show_sell_table(df_norm)
-            with sub3:
-                show_full_table(df_norm)
-            with sub4:
-                show_top6_max_profit(df_norm)
+            st.markdown("#### ✅ Keep / Hold")
+            show_keep_table(df_norm)
+            st.markdown("---")
+            st.markdown("#### ⚠️ Sell / Review")
+            show_sell_table(df_norm)
+            st.markdown("---")
+            st.markdown("#### 📋 Full Portfolio (5-column AI view)")
+            show_full_table(df_norm)
+            st.markdown("---")
+            st.markdown("#### 💰 Top 6 for Maximum Profits")
+            show_top6_max_profit(df_norm)
 
     with tab3:
         show_top10_scanner(df_norm)
