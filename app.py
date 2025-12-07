@@ -313,10 +313,8 @@ def auto_map_columns(df: pd.DataFrame) -> Dict[str, Optional[str]]:
         "scheme": find_col_by_keywords(["scheme name", "fund name", "scheme", "plan name"]),
         "category": find_col_by_keywords(["category"]),
         "subcategory": find_col_by_keywords(["sub category", "sub-category", "subcategory", "sub cat"]),
-        "invested": find_col_by_keywords(
-            ["invested", "investment", "cost value", "purchase amount", "amount invested", "inv amount",
-             "purchase cost", "total investment"]
-        ),
+        # INVESTED: wherever "invest" or "cost" is written in column name
+        "invested": find_col_by_keywords(["invest", "cost"]),
         "current": find_col_by_keywords(
             ["current value", "current", "market value", "value (₹)", "value (rs)", "current value (rs)", "current amount"]
         ),
@@ -330,7 +328,7 @@ def auto_map_columns(df: pd.DataFrame) -> Dict[str, Optional[str]]:
         return mapping
 
     if mapping["invested"] is None:
-        st.warning("⚠️ Could not detect Invested Amount column. Will treat Invested (₹) as 0 unless found.")
+        st.warning("⚠️ Could not detect Invested/Cost column (any column with 'invest' or 'cost'). Will treat Invested (₹) as 0 unless found.")
 
     if mapping["current"] is None:
         st.warning("⚠️ Could not detect Current Value column. Will treat Current Value (₹) as 0 unless found.")
@@ -918,26 +916,6 @@ def show_top6_max_profit(df_norm: pd.DataFrame):
     st.caption("This is a rough AI-style scenario comparison based purely on XIRR and AI scores, not financial advice.")
 
 
-def show_top10_scanner(df_norm: Optional[pd.DataFrame]):
-    st.markdown("### 🏆 Top 10 Mutual Funds (AI Scanner on Your Portfolio – ₹ values)")
-    if df_norm is None or df_norm.empty:
-        st.info("Upload your portfolio file in the main section to see AI-ranked Top 10 funds from your holdings.")
-        return
-
-    # Top 10 by AI Score, but favour Super Core / Core / Satellite
-    bucket_weight = {"Super Core": 3, "Core": 2, "Satellite": 1, "Medium": 0, "Weak": -1, "Exit": -2}
-    df = df_norm.copy()
-    df["bucket_weight"] = df["Bucket"].map(bucket_weight).fillna(0)
-    df["scanner_score"] = df["AI Score"] + df["bucket_weight"] * 3.0
-    df = df.sort_values("scanner_score", ascending=False).head(10)
-
-    # also show in compact 5-col format to be consistent?
-    simple = build_simple_ai_table(df)
-    st.dataframe(simple, use_container_width=True, hide_index=True)
-
-    st.caption("⚠️ This scanner ranks funds *within your portfolio* based on AI-style scoring: XIRR, category role and score. Amounts are shown in compact INR (K / L / Cr).")
-
-
 # ==========================
 # Main App
 # ==========================
@@ -966,9 +944,7 @@ def main():
     if uploaded is not None:
         df_raw = load_portfolio_file(uploaded)
         if df_raw is not None and not df_raw.empty:
-            st.markdown("#### 🔍 Raw Preview (first 10 rows)")
-            st.dataframe(df_raw.head(10), use_container_width=True, hide_index=True)
-
+            # 🔥 Raw preview removed as requested
             mapping = auto_map_columns(df_raw)
             if mapping.get("scheme") is not None:
                 df_norm = build_normalised_df(df_raw, mapping)
@@ -977,11 +953,10 @@ def main():
         else:
             st.stop()
 
-    # Tabs
-    tab1, tab2, tab3 = st.tabs([
+    # Only 2 tabs now: Portfolio + AI Recommendations
+    tab1, tab2 = st.tabs([
         "📊 Portfolio Overview",
         "🤖 AI Recommendations",
-        "🏆 AI Top 10 Scanner",
     ])
 
     with tab1:
@@ -1002,15 +977,12 @@ def main():
             st.markdown("---")
             st.markdown("#### ⚠️ Sell / Review")
             show_sell_table(df_norm)
-            st.markdown("---")
+            st.markmarkdown("---")
             st.markdown("#### 📋 Full Portfolio (5-column AI view)")
             show_full_table(df_norm)
             st.markdown("---")
             st.markdown("#### 💰 Top 6 for Maximum Profits")
             show_top6_max_profit(df_norm)
-
-    with tab3:
-        show_top10_scanner(df_norm)
 
     # Telegram: manual send
     if df_norm is not None and st.session_state.get("send_now_flag", False):
