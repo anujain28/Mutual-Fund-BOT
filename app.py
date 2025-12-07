@@ -283,7 +283,7 @@ def render_sidebar():
 # Data Loading & Mapping
 # ==========================
 
-def load_portfolio_file(uploaded_file: st.runtime.uploaded_file_manager.UploadedFile) -> pd.DataFrame:
+def load_portfolio_file(uploaded_file):
     name = uploaded_file.name.lower()
     try:
         if name.endswith(".csv"):
@@ -392,7 +392,9 @@ def enhance_xirr_with_online_data(df_norm: pd.DataFrame) -> pd.DataFrame:
     if "XIRR (%)" not in df_norm.columns:
         df_norm["XIRR (%)"] = np.nan
 
-    needs_idx = df_norm.index[df_norm["XIRR (%)"]].isna().tolist() if "XIRR (%)" in df_norm.columns else []
+    # FIXED: get indices where XIRR is NaN
+    needs_idx = df_norm.index[df_norm["XIRR (%)"].isna()].tolist()
+
     if needs_idx:
         st.info("🔍 Fetching XIRR online from mfapi.in for schemes missing XIRR (approximate CAGR-style XIRR).")
         cache: Dict[str, Optional[float]] = {}
@@ -900,15 +902,14 @@ def show_top6_max_profit(df_norm: pd.DataFrame):
     new_xirr = float((df_sorted["XIRR (%)"] * weights).sum())
 
     # Year-by-year table for 20 years (Dec 20xx)
-    start_year = datetime.now(IST).year + 1
+    now_year = datetime.now(IST).year
+    start_year = now_year + 1
     years = list(range(start_year, start_year + 20))
 
     rows = []
     for yr in years:
-        n = yr - datetime.now(IST).year
-        # current portfolio projection
+        n = yr - now_year
         fv_current = total_curr * ((1 + current_xirr / 100.0) ** n)
-        # all-in top6 projection
         fv_top6 = total_curr * ((1 + new_xirr / 100.0) ** n)
         diff = fv_top6 - fv_current
 
@@ -969,7 +970,7 @@ def main():
         else:
             st.stop()
 
-    # Tabs: Overview + 4 AI tabs
+    # Tabs: Overview + 4 AI tabs + Top 6
     tab_overview, tab_keep, tab_sell, tab_hold, tab_full, tab_top6 = st.tabs([
         "📊 Overview",
         "✅ Keep",
