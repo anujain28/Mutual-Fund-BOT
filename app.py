@@ -1,22 +1,25 @@
-import streamlit as st
-import pandas as pd
-import numpy as np
-from typing import Dict, Optional, List
+import os
+import json
 from datetime import datetime
+from typing import Dict, Optional
+
+import numpy as np
+import pandas as pd
 import pytz
 import requests
-import json
-import os
-from pathlib import Path
+import streamlit as st
+
+# ==========================
+# Basic Setup & Config
+# ==========================
 
 st.set_page_config(
-    page_title="🧠 MF Analysis Bot",
-    page_icon="📊",
+    page_title="💹 AI Mutual Fund Analysis Bot",
+    page_icon="💹",
     layout="wide",
-    initial_sidebar_state="expanded",
 )
 
-# ------------------------- CONFIG ------------------------- #
+IST = pytz.timezone("Asia/Kolkata")
 
 CONFIG_FILE = "config.json"
 DEFAULT_CONFIG = {
@@ -24,6 +27,7 @@ DEFAULT_CONFIG = {
     "telegram_chat_id": "",
     "notify_enabled": False,
 }
+
 
 def load_config() -> Dict:
     if not os.path.exists(CONFIG_FILE):
@@ -37,7 +41,8 @@ def load_config() -> Dict:
     except Exception:
         return DEFAULT_CONFIG.copy()
 
-def save_config_from_state():
+
+def save_config():
     cfg = {
         "telegram_bot_token": st.session_state.get("telegram_bot_token", ""),
         "telegram_chat_id": st.session_state.get("telegram_chat_id", ""),
@@ -47,185 +52,30 @@ def save_config_from_state():
         with open(CONFIG_FILE, "w") as f:
             json.dump(cfg, f, indent=2)
     except Exception as e:
-        st.warning(f"Could not save config: {e}")
+        st.sidebar.warning(f"Could not save config: {e}")
 
-_cfg = load_config()
 
-# Session state defaults
+# Initialise session state keys
 for key, default in [
-    ("telegram_bot_token", _cfg.get("telegram_bot_token", "")),
-    ("telegram_chat_id", _cfg.get("telegram_chat_id", "")),
-    ("notify_enabled", _cfg.get("notify_enabled", False)),
-    ("last_reco_notify", {}),  # track per-slot sends
+    ("telegram_bot_token", ""),
+    ("telegram_chat_id", ""),
+    ("notify_enabled", False),
+    ("last_reco_notify", {}),
+    ("send_now_flag", False),
 ]:
     if key not in st.session_state:
         st.session_state[key] = default
 
-IST = pytz.timezone("Asia/Kolkata")
-NOTIFY_SLOTS = ["09:30", "13:30", "15:00"]
 
-# ------------------------- STYLES ------------------------- #
-st.markdown(
-    """
-<style>
-.stApp { background-color: #020617; color: #e5e7eb; }
-body { background-color: #020617; color: #e5e7eb; }
+# ==========================
+# Telegram Helpers
+# ==========================
 
-.main-header {
-    background: linear-gradient(120deg, #4f46e5 0%, #0ea5e9 100%);
-    padding: 18px; border-radius: 18px; color: white; margin-bottom: 12px;
-    box-shadow: 0 12px 28px rgba(15,23,42,0.55); border: 1px solid rgba(255,255,255,0.18);
-}
-.main-header h1 { margin-bottom: 4px; font-size: clamp(1.6rem, 3vw, 2.3rem); }
-.main-header p { margin: 0; font-size: 0.9rem; opacity: 0.96; }
-.status-badge {
-    display: inline-block; padding: 4px 10px; border-radius: 999px; font-size: 0.7rem;
-    text-transform: uppercase; letter-spacing: 0.07em; background: rgba(15,23,42,0.35);
-    border: 1px solid rgba(226,232,240,0.7); margin-top: 6px;
-}
-
-.metric-card {
-    padding: 12px; border-radius: 14px; background: #020617;
-    border: 1px solid #1f2937;
-    box-shadow: 0 4px 14px rgba(15,23,42,0.7);
-    margin-bottom: 10px; color: #e5e7eb;
-}
-.metric-card h3 { font-size: 0.9rem; color: #e5e7eb; margin-bottom: 4px; }
-.metric-card .value { font-size: 1.15rem; font-weight: 600; color: #f9fafb; }
-.metric-card .sub { font-size: 0.8rem; color: #9ca3af; }
-
-.dark-table {
-    width: 100%;
-    border-collapse: collapse;
-    background-color: #020617;
-    color: #f9fafb;
-    border-radius: 12px;
-    overflow: hidden;
-    margin-top: 8px;
-    margin-bottom: 12px;
-}
-.dark-table th, .dark-table td {
-    padding: 8px 10px;
-    border: 1px solid #1f2937;
-    font-size: 0.85rem;
-}
-.dark-table th {
-    background-color: #111827;
-    font-weight: 600;
-    text-align: left;
-}
-
-/* make all dataframes dark */
-div[data-testid="stDataFrame"] table {
-    background-color: #020617 !important;
-    color: #f9fafb !important;
-}
-div[data-testid="stDataFrame"] th,
-div[data-testid="stDataFrame"] td {
-    background-color: #020617 !important;
-    color: #f9fafb !important;
-    border-color: #1f2937 !important;
-    font-size: 0.85rem !important;
-}
-
-/* uploader button */
-div[data-testid="stFileUploader"] section button {
-    background-color: #111827 !important;
-    color: #f9fafb !important;
-    border: 1px solid #374151 !important;
-    font-weight: 500 !important;
-}
-div[data-testid="stFileUploader"] section button:hover {
-    background-color: #1f2937 !important;
-}
-</style>
-""",
-    unsafe_allow_html=True,
-)
-
-# ------------------------- HELPERS ------------------------- #
-
-
-def fmt_inr(x: float) -> str:
-    try:
-        return f"₹{x:,.2f}"
-    except Exception:
-        return "₹0.00"
-
-
-def fmt_lakhs(x: float) -> str:
-    try:
-        return f"₹{x/1e5:.2f} L"
-    except Exception:
-        return "₹0.00 L"
-
-
-def load_mf_file(uploaded) -> pd.DataFrame:
-    name = uploaded.name.lower()
-    try:
-        if name.endswith(".csv"):
-            df = pd.read_csv(uploaded, sep=None, engine="python")
-        elif name.endswith((".xls", ".xlsx")):
-            df = pd.read_excel(uploaded)
-        else:
-            st.error("Only CSV, XLS, XLSX files supported.")
-            return pd.DataFrame()
-        return df
-    except Exception as e:
-        st.error(f"Error reading file: {e}")
-        return pd.DataFrame()
-
-
-def map_mf_columns(df: pd.DataFrame) -> (Optional[Dict[str, str]], Optional[str]):
-    """
-    Try to map Groww / CAMS / generic MF headers to logical keys.
-    Keep it flexible using multiple possible header names.
-    """
-    lowered = {c.lower().strip(): c for c in df.columns}
-
-    def find_col(candidates: List[str]) -> Optional[str]:
-        for cand in candidates:
-            if cand in lowered:
-                return lowered[cand]
-        return None
-
-    mapping = {
-        "scheme": find_col(["scheme name", "scheme", "fund name", "scheme_name"]),
-        "category": find_col(["category", "scheme category", "fund category"]),
-        "sub_category": find_col(["sub category", "scheme sub category", "sub_category"]),
-        "invested": find_col(["invested amount", "investment amount", "amount invested", "cost value"]),
-        "current": find_col(["current value", "value", "current amount", "market value"]),
-        "xirr": find_col(["xirr", "xirr (since inception)", "return % (xirr)", "returns xirr"]),
-        "ret_1y": find_col(["1y return", "1 year return", "returns 1y", "return 1y"]),
-        "ret_3y": find_col(["3y return", "3 year return", "returns 3y", "return 3y"]),
-        "ret_5y": find_col(["5y return", "5 year return", "returns 5y", "return 5y"]),
-        "exp_ratio": find_col(["expense ratio", "expense_ratio", "ter"]),
-        "risk": find_col(["risk", "risk label", "riskometer", "risk level"]),
-    }
-
-    required = ["scheme", "invested", "current"]
-    missing = [k for k in required if mapping[k] is None]
-
-    if missing:
-        return None, (
-            "Could not detect essential columns. I need at least: "
-            "Scheme / Fund Name, Invested Amount, Current Value.\n\n"
-            "Detected columns:\n" + ", ".join(df.columns.astype(str))
-        )
-    return mapping, None
-
-
-def to_num(s: pd.Series) -> pd.Series:
-    return pd.to_numeric(s, errors="coerce").fillna(0.0)
-
-
-# ------------------------- TELEGRAM HELPERS ------------------------- #
-
-def send_telegram_message(text: str):
+def send_telegram_message(text: str) -> Dict:
     token = st.session_state.get("telegram_bot_token", "")
     chat_id = st.session_state.get("telegram_chat_id", "")
     if not token or not chat_id:
-        return {"ok": False, "error": "Missing Telegram config"}
+        return {"ok": False, "error": "Telegram not configured"}
     url = f"https://api.telegram.org/bot{token}/sendMessage"
     try:
         r = requests.get(url, params={"chat_id": chat_id, "text": text})
@@ -234,456 +84,777 @@ def send_telegram_message(text: str):
         return {"ok": False, "error": str(e)}
 
 
-def build_telegram_reco_message(df: pd.DataFrame, now: datetime) -> str:
-    """
-    Build message using buckets & allocation.
-    Shows top 3 funds in each good bucket by allocation.
-    """
-    lines = []
-    lines.append("📊 MF Auto Recommendations")
-    lines.append(f"🕒 {now.strftime('%d-%m-%Y %H:%M')} IST")
-    lines.append("")
-
-    if "Bucket" not in df.columns or "Allocation (%)" not in df.columns:
-        lines.append("No bucketed data available.")
-        return "\n".join(lines)
-
+def generate_telegram_reco_text(df_norm: pd.DataFrame) -> str:
+    if df_norm is None or df_norm.empty:
+        return ""
+    # Only Super Core / Core / Satellite for TG
     buckets_order = ["Super Core", "Core", "Satellite"]
+    lines = []
+    now = datetime.now(IST)
+    header = f"📊 MF Auto Recommendations\n🕒 {now.strftime('%d-%m-%Y %I:%M %p')} IST\n"
+    lines.append(header)
+
     for b in buckets_order:
-        sub = df[df["Bucket"] == b].copy()
+        sub = df_norm[df_norm["Bucket"] == b]
         if sub.empty:
             continue
-        sub = sub.sort_values("Allocation (%)", ascending=False).head(3)
-        lines.append(f"• {b}:")
-        for _, r in sub.iterrows():
-            nm = r["Scheme Name"]
-            alloc = r["Allocation (%)"]
-            xirr = r.get("XIRR (%)", np.nan)
-            horizon = r.get("Suggested Horizon", "")
-            if not np.isnan(xirr):
-                lines.append(f"   - {nm} ({alloc:.1f}% alloc, XIRR {xirr:.1f}%)")
-            else:
-                lines.append(f"   - {nm} ({alloc:.1f}% alloc)")
-            if horizon:
-                lines.append(f"     ↳ Horizon: {horizon}")
-        lines.append("")
+        sub = sub.sort_values("AI Score", ascending=False).head(3)
+        lines.append(f"\n⭐ {b}:")
+        for _, row in sub.iterrows():
+            nm = row["Scheme Name"]
+            xirr = row.get("XIRR (%)", np.nan)
+            rec = row.get("Recommendation", "")
+            tgt = row.get("Target Year", "")
+            msg = f"• {nm}"
+            if not pd.isna(xirr):
+                msg += f" | XIRR ~ {xirr:.1f}%"
+            if tgt:
+                msg += f" | 🎯 {tgt}"
+            if rec:
+                msg += f" | {rec}"
+            lines.append(msg)
 
-    if len(lines) <= 3:
-        lines.append("No strong MF candidates available yet.")
-    lines.append("")
-    lines.append("#MutualFunds #LongTerm #India")
-    return "\n".join(lines)
+    return "\n".join(lines).strip()
 
 
-def send_scheduled_recommendations(df: pd.DataFrame, now: datetime):
-    msg = build_telegram_reco_message(df, now)
-    resp = send_telegram_message(msg)
-    st.caption("📤 Telegram MF recommendations sent.")
-    return resp
-
-
-def handle_scheduled_notifications(df: pd.DataFrame):
-    """
-    On each rerun, check if current IST time is inside any notification slot window.
-    Uses st.session_state['last_reco_notify'] to avoid multiple sends for same slot/day.
-    """
+def handle_scheduled_notifications(df_norm: Optional[pd.DataFrame]):
+    if df_norm is None or df_norm.empty:
+        return
     if not st.session_state.get("notify_enabled", False):
+        return
+    if not st.session_state.get("telegram_bot_token") or not st.session_state.get("telegram_chat_id"):
         return
 
     now = datetime.now(IST)
     today_str = now.strftime("%Y-%m-%d")
-    last_map = st.session_state.get("last_reco_notify", {}) or {}
 
-    for slot in NOTIFY_SLOTS:
-        hr, mn = map(int, slot.split(":"))
-        scheduled_dt = now.replace(hour=hr, minute=mn, second=0, microsecond=0)
-        window_start = scheduled_dt
-        window_end = scheduled_dt.replace(minute=scheduled_dt.minute + 5)
-        already_sent_today = last_map.get(slot) == today_str
-
-        if (now >= window_start) and (now <= window_end) and not already_sent_today:
-            send_scheduled_recommendations(df, now)
-            last_map[slot] = today_str
-            st.session_state["last_reco_notify"] = last_map
-
-# ------------------------- MF RULE ENGINE ------------------------- #
-
-
-def classify_mf_row(row: pd.Series) -> (str, str):
-    """
-    Return (bucket, short_reason)
-    Buckets: Super Core, Core, Satellite, Weak, Exit
-    """
-    scheme = str(row.get("Scheme Name", "")).upper()
-    cat = str(row.get("Category", "")).upper()
-    sub = str(row.get("Sub Category", "")).upper()
-    risk = str(row.get("Risk", "")).upper()
-
-    xirr = float(row.get("XIRR (%)", 0.0))
-    r3 = float(row.get("3Y Return (%)", 0.0))
-    r5 = float(row.get("5Y Return (%)", 0.0))
-    gain_pct = float(row.get("Gain (%)", 0.0))
-
-    is_index = any(k in scheme for k in ["NIFTY", "SENSEX", "INDEX"])
-    is_large = "LARGE" in cat or "LARGE" in sub
-    is_mid = "MID" in cat or "MID" in sub
-    is_small = "SMALL" in cat or "SMALL" in sub
-    is_sector = any(k in cat for k in ["SECTOR", "THEME"]) or any(
-        k in sub for k in ["SECTOR", "THEME"]
-    )
-
-    high_risk = any(k in risk for k in ["HIGH", "VERY HIGH"])
-    low_risk = any(k in risk for k in ["LOW", "MODERATE"])
-
-    # Super Core: Broad market compounding
-    if (is_index or is_large) and not is_sector and xirr >= 12 and r5 >= 12 and low_risk:
-        return "Super Core", "Broad market compounder for 15–20+ years"
-
-    # Core: Diversified equity with decent history
-    if (is_large or is_mid or is_index) and xirr >= 10 and r3 >= 10 and not is_sector:
-        return "Core", "Diversified equity suitable for 10–15 years"
-
-    # Satellite: thematic / small & mid for aggression
-    if is_small or is_sector or high_risk:
-        if xirr >= 12 or r3 >= 15:
-            return "Satellite", "High growth potential; limit allocation; 7–10 year bet"
-        return "Weak", "Risky / thematic with average history"
-
-    # Weak & Exit decisions
-    if xirr < 6 and r3 < 8 and r5 < 8 and gain_pct < 10:
-        return "Exit", "Long-term returns weak; consider switch to better funds"
-
-    if xirr < 8 and r3 < 10 and gain_pct < 12:
-        return "Weak", "Below-par compounding; keep under watch"
-
-    # Default fallback
-    return "Core", "Reasonable long-term candidate"
-
-
-def suggest_horizon_mf(bucket: str) -> str:
-    if bucket == "Super Core":
-        return "20+ years (retirement / wealth core)"
-    if bucket == "Core":
-        return "10–15 years (main growth engine)"
-    if bucket == "Satellite":
-        return "5–10 years (aggressive satellite)"
-    if bucket == "Weak":
-        return "Review in 1–3 years; consider switch"
-    return "0–1 year (gradual exit & redeploy)"
-
-
-# ------------------------- APP ------------------------- #
-
-
-def main():
-    st.markdown(
-        """
-<div class="main-header">
-  <h1>🧠 Mutual Fund Analysis Bot</h1>
-  <p>Upload your MF portfolio (Groww / CAMS / KFin) • Get 20-year view • Core / Satellite buckets</p>
-  <div class="status-badge">Long-term • Compounding • India</div>
-</div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    # ---- Sidebar: Telegram configuration ---- #
-    with st.sidebar:
-        st.markdown("### ⚙️ Telegram Notifications")
-        notify_toggle = st.checkbox(
-            "Enable Telegram MF recommendations",
-            value=st.session_state.get("notify_enabled", False),
-            key="notify_enabled_chk",
-        )
-        st.session_state["notify_enabled"] = notify_toggle
-
-        tg_token = st.text_input(
-            "Bot Token",
-            value=st.session_state.get("telegram_bot_token", ""),
-            type="password",
-        )
-        tg_chat = st.text_input(
-            "Chat ID",
-            value=st.session_state.get("telegram_chat_id", ""),
-        )
-        st.session_state["telegram_bot_token"] = tg_token
-        st.session_state["telegram_chat_id"] = tg_chat
-
-        if st.button("💾 Save Telegram Config"):
-            save_config_from_state()
-            st.success("Telegram settings saved to config.json")
-
-        st.caption(
-            "Auto recommendations will be sent at **09:30, 13:30, 15:00 IST** "
-            "whenever this app session is active."
-        )
-
-    st.markdown("### 📂 Upload Mutual Fund Portfolio File")
-    st.write(
-        "Supported: **CSV / XLS / XLSX**. Export from Groww / CAMS / KFin with columns like "
-        "`Scheme Name, Category, Invested Amount, Current Value, XIRR, 1Y/3Y/5Y Returns, Expense Ratio, Risk`."
-    )
-
-    uploaded = st.file_uploader(
-        "Drop your MF holdings file here", type=["csv", "xls", "xlsx"], key="mf_file"
-    )
-
-    if uploaded is None:
-        st.info("Upload your mutual fund holdings file to begin analysis.")
-        return
-
-    df_raw = load_mf_file(uploaded)
-    if df_raw.empty:
-        return
-
-    mapping, err = map_mf_columns(df_raw)
-    if err:
-        st.error(err)
-        st.write("Raw preview:")
-        st.dataframe(df_raw.head(), use_container_width=True)
-        return
-
-    st.markdown("#### 🔍 Raw Preview")
-    st.dataframe(df_raw.head(), use_container_width=True)
-
-    # Normalised DF
-    df = pd.DataFrame()
-    df["Scheme Name"] = df_raw[mapping["scheme"]].astype(str)
-    df["Category"] = (
-        df_raw[mapping["category"]].astype(str)
-        if mapping["category"]
-        else "NA"
-    )
-    df["Sub Category"] = (
-        df_raw[mapping["sub_category"]].astype(str)
-        if mapping["sub_category"]
-        else "NA"
-    )
-
-    df["Invested (₹)"] = to_num(df_raw[mapping["invested"]])
-    df["Current (₹)"] = to_num(df_raw[mapping["current"]])
-    df["Gain (₹)"] = df["Current (₹)"] - df["Invested (₹)"]
-    df["Gain (%)"] = np.where(
-        df["Invested (₹)"] > 0,
-        df["Gain (₹)"] / df["Invested (₹)"] * 100.0,
-        0.0,
-    )
-
-    if mapping["xirr"]:
-        df["XIRR (%)"] = to_num(df_raw[mapping["xirr"]])
-    else:
-        df["XIRR (%)"] = np.nan
-
-    if mapping["ret_1y"]:
-        df["1Y Return (%)"] = to_num(df_raw[mapping["ret_1y"]])
-    else:
-        df["1Y Return (%)"] = np.nan
-
-    if mapping["ret_3y"]:
-        df["3Y Return (%)"] = to_num(df_raw[mapping["ret_3y"]])
-    else:
-        df["3Y Return (%)"] = np.nan
-
-    if mapping["ret_5y"]:
-        df["5Y Return (%)"] = to_num(df_raw[mapping["ret_5y"]])
-    else:
-        df["5Y Return (%)"] = np.nan
-
-    if mapping["exp_ratio"]:
-        df["Expense Ratio (%)"] = to_num(df_raw[mapping["exp_ratio"]])
-    else:
-        df["Expense Ratio (%)"] = np.nan
-
-    if mapping["risk"]:
-        df["Risk"] = df_raw[mapping["risk"]].astype(str)
-    else:
-        df["Risk"] = "NA"
-
-    total_current = float(df["Current (₹)"].sum())
-    total_invested = float(df["Invested (₹)"].sum())
-    total_gain = float(df["Gain (₹)"].sum())
-    overall_gain_pct = (
-        total_gain / total_invested * 100.0 if total_invested > 0 else 0.0
-    )
-
-    df["Allocation (%)"] = np.where(
-        total_current > 0, df["Current (₹)"] / total_current * 100.0, 0.0
-    )
-
-    # Simple portfolio "blended" XIRR approximation using Allocation
-    if df["XIRR (%)"].notna().any():
-        df["_w"] = df["Allocation (%)"] / 100.0
-        blended_xirr = float((df["XIRR (%)"].fillna(0.0) * df["_w"]).sum())
-    else:
-        blended_xirr = np.nan
-
-    # Bucketing
-    buckets = []
-    reasons = []
-    horizons = []
-    for _, r in df.iterrows():
-        b, reason = classify_mf_row(r)
-        buckets.append(b)
-        reasons.append(reason)
-        horizons.append(suggest_horizon_mf(b))
-
-    df["Bucket"] = buckets
-    df["Bucket Reason"] = reasons
-    df["Suggested Horizon"] = horizons
-
-    # Map buckets → target year (2045, 2040, etc.)
-    bucket_year_map = {
-        "Super Core": 2045,
-        "Core": 2040,
-        "Satellite": 2035,
-        "Weak": 2030,
-        "Exit": 2026,
+    # Slots: key -> (hour, minute)
+    slots = {
+        "morning": (9, 30),
+        "midday": (13, 30),
+        "close": (15, 0),
     }
-    df["Target Year"] = df["Bucket"].map(bucket_year_map)
 
-    # ----------------- Portfolio Snapshot ----------------- #
-    st.markdown("### 📈 Portfolio Snapshot")
+    last_map: Dict = st.session_state.get("last_reco_notify", {}) or {}
+
+    for key, (h, m) in slots.items():
+        if now.hour == h and abs(now.minute - m) <= 2:
+            last = last_map.get(key, "")
+            if last.startswith(today_str):
+                continue  # already sent this slot today
+            msg = generate_telegram_reco_text(df_norm)
+            if msg:
+                send_telegram_message(msg)
+                last_map[key] = today_str + " " + now.strftime("%H:%M")
+                st.caption(f"📬 Telegram recommendations sent for slot: {key} at {now.strftime('%H:%M')} IST")
+
+    st.session_state["last_reco_notify"] = last_map
+
+
+# ==========================
+# Sidebar
+# ==========================
+
+def render_sidebar():
+    st.sidebar.title("⚙️ Settings & Links")
+
+    # Stocks app link
+    st.sidebar.markdown("### 🔗 Other Tools")
+    st.sidebar.markdown("[📈 Open Stocks Analysis App](https://airobots.streamlit.app/)")
+    st.sidebar.markdown("---")
+
+    # Load config into state
+    cfg = load_config()
+    if not st.session_state.get("telegram_bot_token"):
+        st.session_state["telegram_bot_token"] = cfg.get("telegram_bot_token", "")
+    if not st.session_state.get("telegram_chat_id"):
+        st.session_state["telegram_chat_id"] = cfg.get("telegram_chat_id", "")
+    if "notify_enabled" not in st.session_state or st.session_state["notify_enabled"] is False:
+        st.session_state["notify_enabled"] = cfg.get("notify_enabled", False)
+
+    st.sidebar.subheader("📨 Telegram Recommendations")
+
+    st.sidebar.checkbox(
+        "Enable auto recommendations (9:30, 13:30, 15:00 IST)",
+        value=st.session_state.get("notify_enabled", False),
+        key="notify_enabled",
+    )
+    st.sidebar.text_input(
+        "Bot Token",
+        value=st.session_state.get("telegram_bot_token", ""),
+        key="telegram_bot_token",
+    )
+    st.sidebar.text_input(
+        "Chat ID",
+        value=st.session_state.get("telegram_chat_id", ""),
+        key="telegram_chat_id",
+    )
+
+    c1, c2 = st.sidebar.columns(2)
+    with c1:
+        if st.button("💾 Save", key="btn_save_tg_sidebar"):
+            save_config()
+            st.sidebar.success("Saved config.json")
+    with c2:
+        if st.button("📤 Send Now", key="btn_send_now_sidebar"):
+            st.session_state["send_now_flag"] = True
+
+
+# ==========================
+# Data Loading & Mapping
+# ==========================
+
+def load_portfolio_file(uploaded_file: st.runtime.uploaded_file_manager.UploadedFile) -> pd.DataFrame:
+    name = uploaded_file.name.lower()
+    try:
+        if name.endswith(".csv"):
+            df = pd.read_csv(uploaded_file, sep=None, engine="python")
+        elif name.endswith((".xls", ".xlsx")):
+            df = pd.read_excel(uploaded_file)
+        else:
+            st.error("Only CSV, XLS, or XLSX files are supported.")
+            return pd.DataFrame()
+        return df
+    except Exception as e:
+        st.error(f"Error reading file: {e}")
+        return pd.DataFrame()
+
+
+def auto_map_columns(df: pd.DataFrame) -> Dict[str, Optional[str]]:
+    cols = list(df.columns)
+
+    def find_col(candidates):
+        for c in cols:
+            low = str(c).lower()
+            if any(k in low for k in candidates):
+                return c
+        return None
+
+    mapping = {
+        "scheme": find_col(["scheme name", "fund name", "scheme", "plan name"]),
+        "category": find_col(["category"]),
+        "subcategory": find_col(["sub category", "sub-category", "subcategory", "sub cat"]),
+        "invested": find_col(["investment", "cost value", "purchase amount", "amount invested", "inv amount", "purchase cost"]),
+        "current": find_col(["current value", "current amount", "market value", "value (₹)", "value (rs)"]),
+        "xirr": find_col(["xirr"]),
+        "dividend": find_col(["dividend yield", "dividend (%)", "dividend %"]),
+    }
+
+    if mapping["scheme"] is None:
+        st.error("Could not auto-detect 'Scheme Name' column. Please ensure it contains text like 'Scheme Name' or 'Fund Name'.")
+        st.write("Detected columns:", cols)
+        return mapping
+
+    return mapping
+
+
+# ==========================
+# XIRR from Internet (mfapi.in)
+# ==========================
+
+def fetch_scheme_xirr_from_mfapi_by_name(scheme_name: str) -> Optional[float]:
+    """
+    Approximate XIRR using mfapi.in NAV history (CAGR style).
+    """
+    try:
+        q = scheme_name.strip()
+        if not q:
+            return None
+        search_url = "https://api.mfapi.in/mf/search"
+        r = requests.get(search_url, params={"q": q}, timeout=8)
+        if not r.ok:
+            return None
+        data = r.json()
+        if not isinstance(data, list) or not data:
+            return None
+        scheme_code = data[0].get("schemeCode")
+        if not scheme_code:
+            return None
+
+        nav_url = f"https://api.mfapi.in/mf/{scheme_code}"
+        r2 = requests.get(nav_url, timeout=10)
+        if not r2.ok:
+            return None
+        j2 = r2.json()
+        nav_list = j2.get("data", [])
+        if not nav_list:
+            return None
+
+        # Ensure sorted by date ascending
+        def _parse_date(d):
+            return datetime.strptime(d["date"], "%d-%m-%Y")
+
+        nav_sorted = sorted(nav_list, key=_parse_date)
+        first = nav_sorted[0]
+        last = nav_sorted[-1]
+        nav_start = float(first["nav"])
+        nav_end = float(last["nav"])
+        if nav_start <= 0:
+            return None
+        d0 = _parse_date(first)
+        d1 = _parse_date(last)
+        years = max((d1 - d0).days / 365.0, 1.0)
+        cagr = (nav_end / nav_start) ** (1.0 / years) - 1.0
+        return round(cagr * 100.0, 2)
+    except Exception:
+        return None
+
+
+def enhance_xirr_with_online_data(df_norm: pd.DataFrame) -> pd.DataFrame:
+    if "XIRR (%)" not in df_norm.columns:
+        df_norm["XIRR (%)"] = np.nan
+
+    needs_idx = df_norm.index[df_norm["XIRR (%)"].isna()].tolist()
+    if not needs_idx:
+        return df_norm
+
+    st.info("🔍 Fetching XIRR online from mfapi.in for schemes missing XIRR. (Approximate CAGR-style XIRR)")
+    cache: Dict[str, Optional[float]] = {}
+    prog = st.progress(0.0)
+    for i, idx in enumerate(needs_idx):
+        name = str(df_norm.at[idx, "Scheme Name"])
+        key = name.upper()
+        if key in cache:
+            xirr_val = cache[key]
+        else:
+            xirr_val = fetch_scheme_xirr_from_mfapi_by_name(name)
+            cache[key] = xirr_val
+        if xirr_val is not None:
+            df_norm.at[idx, "XIRR (%)"] = xirr_val
+        prog.progress((i + 1) / len(needs_idx))
+    prog.empty()
+    return df_norm
+
+
+# ==========================
+# AI Classification & Buckets
+# ==========================
+
+def classify_bucket(category: str, subcat: str, xirr: float, pnl_pct: float, scheme_name: str) -> str:
+    cat_lower = (category or "").lower()
+    sub_lower = (subcat or "").lower()
+    name_lower = (scheme_name or "").lower()
+
+    is_index = "index" in cat_lower or "index" in sub_lower or "nifty" in name_lower or "sensex" in name_lower
+    is_large = "large" in cat_lower or "large cap" in sub_lower or "bluechip" in sub_lower
+    is_smallmid = any(k in (cat_lower + sub_lower) for k in ["small", "mid"])
+    is_thematic = any(k in (cat_lower + sub_lower) for k in ["sector", "theme", "thematic", "psu", "banking", "infra", "pharma", "energy", "auto", "technology", "digital", "gold", "it"])
+
+    if np.isnan(xirr):
+        xirr = 8.0
+    if np.isnan(pnl_pct):
+        pnl_pct = 0.0
+
+    # Super Core: index / large diversified with good XIRR
+    if (is_index or is_large) and xirr >= 11:
+        return "Super Core"
+    # Core: diversified equity / flexi cap / large-mid with decent XIRR
+    if (is_index or is_large) and xirr >= 9:
+        return "Core"
+    if (not is_smallmid and not is_thematic) and xirr >= 10:
+        return "Core"
+    # Satellite: mid/small / thematic / factor funds with good XIRR
+    if is_smallmid and xirr >= 12:
+        return "Satellite"
+    if is_thematic and xirr >= 10:
+        return "Satellite"
+    # Medium: okay-ish performers
+    if xirr >= 7 and pnl_pct > -25:
+        return "Medium"
+    # Exit: long-term poor + deep drawdown
+    if xirr < 3 and pnl_pct < -20:
+        return "Exit"
+    # Default
+    return "Weak"
+
+
+def target_year_and_horizon(bucket: str):
+    if bucket == "Super Core":
+        return 2045, "20+ years"
+    if bucket == "Core":
+        return 2040, "10–15 years"
+    if bucket == "Satellite":
+        return 2035, "7–10 years"
+    if bucket == "Medium":
+        return 2030, "5–7 years"
+    # Weak / Exit
+    return 2026, "0–3 years / Review"
+
+
+def recommendation_from_bucket(bucket: str) -> str:
+    if bucket == "Super Core":
+        return "BUY & HOLD 20+ yrs"
+    if bucket == "Core":
+        return "BUY / HOLD 10–15 yrs"
+    if bucket == "Satellite":
+        return "BUY (Aggressive 7–10 yrs)"
+    if bucket == "Medium":
+        return "HOLD / REVIEW"
+    if bucket == "Exit":
+        return "EXIT / SWITCH GRADUALLY"
+    return "REVIEW / AVOID NEW"
+
+
+def bucket_reason(row: pd.Series) -> str:
+    bucket = row.get("Bucket", "")
+    xirr = row.get("XIRR (%)", np.nan)
+    cat = row.get("Category", "")
+    pnl = row.get("P&L (%)", np.nan)
+
+    parts = []
+    if bucket == "Super Core":
+        parts.append("Low-cost diversified or index-style core holding.")
+    elif bucket == "Core":
+        parts.append("Strong long-term core equity candidate.")
+    elif bucket == "Satellite":
+        parts.append("Higher-risk satellite bet for extra returns.")
+    elif bucket == "Medium":
+        parts.append("Decent but not standout performance.")
+    elif bucket == "Exit":
+        parts.append("Persistently weak risk–reward profile.")
+    else:
+        parts.append("Mixed signals; keep under periodic review.")
+
+    if not pd.isna(xirr):
+        parts.append(f"Scheme XIRR ≈ {xirr:.1f}% p.a.")
+    if not pd.isna(pnl):
+        parts.append(f"Total P&L ≈ {pnl:.1f}%")
+    if cat:
+        parts.append(f"Category: {cat}")
+
+    return " ".join(parts)
+
+
+def compute_ai_score(row: pd.Series) -> float:
+    score = 50.0
+    xirr = row.get("XIRR (%)", np.nan)
+    pnl = row.get("P&L (%)", np.nan)
+    divy = row.get("Dividend Yield (%)", 0.0)
+    bucket = row.get("Bucket", "")
+
+    if not pd.isna(xirr):
+        if xirr >= 15:
+            score += 20
+        elif xirr >= 12:
+            score += 15
+        elif xirr >= 10:
+            score += 10
+        elif xirr >= 8:
+            score += 5
+        elif xirr < 0:
+            score -= 10
+
+    if not pd.isna(pnl):
+        if pnl < -15:
+            score += 3  # possibly undervalued
+        elif pnl > 40:
+            score -= 3  # already run up a lot
+
+    try:
+        if float(divy) > 0.5:
+            score += 3
+    except Exception:
+        pass
+
+    if bucket == "Super Core":
+        score += 10
+    elif bucket == "Core":
+        score += 5
+    elif bucket == "Exit":
+        score -= 10
+
+    return float(max(0.0, min(100.0, score)))
+
+
+def build_normalised_df(df_raw: pd.DataFrame, mapping: Dict[str, Optional[str]]) -> pd.DataFrame:
+    if mapping.get("scheme") is None:
+        return pd.DataFrame()
+
+    out = pd.DataFrame()
+    out["Scheme Name"] = df_raw[mapping["scheme"]].astype(str).str.strip()
+
+    out["Category"] = (
+        df_raw[mapping["category"]].astype(str).str.strip()
+        if mapping.get("category") and mapping["category"] in df_raw.columns
+        else "Unknown"
+    )
+    out["Sub Category"] = (
+        df_raw[mapping["subcategory"]].astype(str).str.strip()
+        if mapping.get("subcategory") and mapping["subcategory"] in df_raw.columns
+        else "Unknown"
+    )
+
+    # Invested & Current values
+    if mapping.get("invested") and mapping["invested"] in df_raw.columns:
+        invested = pd.to_numeric(df_raw[mapping["invested"]], errors="coerce").fillna(0.0)
+    else:
+        invested = pd.Series(0.0, index=df_raw.index)
+
+    if mapping.get("current") and mapping["current"] in df_raw.columns:
+        current = pd.to_numeric(df_raw[mapping["current"]], errors="coerce").fillna(0.0)
+    else:
+        current = pd.Series(0.0, index=df_raw.index)
+
+    out["Invested (₹)"] = invested.round(2)
+    out["Current Value (₹)"] = current.round(2)
+    out["P&L (₹)"] = (out["Current Value (₹)"] - out["Invested (₹)"]).round(2)
+    out["P&L (%)"] = np.where(
+        out["Invested (₹)"] > 0,
+        (out["P&L (₹)"] / out["Invested (₹)"]) * 100.0,
+        np.nan,
+    )
+
+    # XIRR from file if present
+    if mapping.get("xirr") and mapping["xirr"] in df_raw.columns:
+        xirr = pd.to_numeric(df_raw[mapping["xirr"]], errors="coerce")
+        out["XIRR (%)"] = xirr
+    else:
+        out["XIRR (%)"] = np.nan
+
+    # Dividend Yield
+    if mapping.get("dividend") and mapping["dividend"] in df_raw.columns:
+        divy = pd.to_numeric(df_raw[mapping["dividend"]], errors="coerce").fillna(0.0)
+        out["Dividend Yield (%)"] = divy
+    else:
+        out["Dividend Yield (%)"] = 0.0
+
+    # Enhance XIRR from internet when missing
+    out = enhance_xirr_with_online_data(out)
+
+    # Buckets & AI fields
+    buckets = []
+    tgt_years = []
+    horizons = []
+    recos = []
+    reasons = []
+    scores = []
+
+    for _, r in out.iterrows():
+        bucket = classify_bucket(
+            r.get("Category", ""),
+            r.get("Sub Category", ""),
+            r.get("XIRR (%)", np.nan),
+            r.get("P&L (%)", np.nan),
+            r.get("Scheme Name", ""),
+        )
+        tgt, horizon = target_year_and_horizon(bucket)
+        reco = recommendation_from_bucket(bucket)
+        reason = bucket_reason(r)
+        score = compute_ai_score(pd.Series({**r.to_dict(), "Bucket": bucket}))
+
+        buckets.append(bucket)
+        tgt_years.append(tgt)
+        horizons.append(horizon)
+        recos.append(reco)
+        reasons.append(reason)
+        scores.append(score)
+
+    out["Bucket"] = buckets
+    out["Target Year"] = tgt_years
+    out["Suggested Horizon"] = horizons
+    out["Recommendation"] = recos
+    out["Bucket Reason"] = reasons
+    out["AI Score"] = scores
+
+    # Sort by Target Year then Bucket strength
+    bucket_rank = {"Super Core": 1, "Core": 2, "Satellite": 3, "Medium": 4, "Weak": 5, "Exit": 6}
+    out["_bucket_rank"] = out["Bucket"].map(bucket_rank).fillna(9)
+    out = out.sort_values(["Target Year", "_bucket_rank", "AI Score"], ascending=[True, True, False]).reset_index(drop=True)
+    out.drop(columns=["_bucket_rank"], inplace=True)
+
+    return out
+
+
+# ==========================
+# NFO Fetch
+# ==========================
+
+def fetch_nfo_data() -> pd.DataFrame:
+    """
+    Try a couple of public pages to get NFO list via read_html.
+    If fails, return empty df and we show links instead.
+    """
+    urls = [
+        "https://www.valueresearchonline.com/funds/new-fund-offers/",
+        "https://www.amfiindia.com/new-fund-offer",
+    ]
+    for url in urls:
+        try:
+            tables = pd.read_html(url)
+            if tables:
+                df = tables[0]
+                return df
+        except Exception:
+            continue
+    return pd.DataFrame()
+
+
+# ==========================
+# Display Helpers
+# ==========================
+
+def portfolio_snapshot(df_norm: pd.DataFrame):
+    total_inv = float(df_norm["Invested (₹)"].sum())
+    total_curr = float(df_norm["Current Value (₹)"].sum())
+    total_pnl = total_curr - total_inv
+    pnl_pct = (total_pnl / total_inv * 100.0) if total_inv > 0 else np.nan
+
+    # Weighted XIRR (approx)
+    if "XIRR (%)" in df_norm.columns:
+        xirr_series = df_norm["XIRR (%)"].dropna()
+        if not xirr_series.empty and total_inv > 0:
+            weights = df_norm.loc[xirr_series.index, "Invested (₹)"]
+            if weights.sum() > 0:
+                weights = weights / weights.sum()
+                portfolio_xirr = float((xirr_series * weights).sum())
+            else:
+                portfolio_xirr = np.nan
+        else:
+            portfolio_xirr = np.nan
+    else:
+        portfolio_xirr = np.nan
 
     c1, c2, c3, c4 = st.columns(4)
     with c1:
-        st.markdown(
-            f"<div class='metric-card'><h3>Total Invested</h3>"
-            f"<div class='value'>{fmt_inr(total_invested)}</div></div>",
-            unsafe_allow_html=True,
-        )
+        st.metric("Total Investment", f"₹{total_inv:,.0f}")
     with c2:
-        st.markdown(
-            f"<div class='metric-card'><h3>Current Value</h3>"
-            f"<div class='value'>{fmt_inr(total_current)}</div></div>",
-            unsafe_allow_html=True,
-        )
+        st.metric("Current Value", f"₹{total_curr:,.0f}")
     with c3:
-        st.markdown(
-            f"<div class='metric-card'><h3>Total Gain</h3>"
-            f"<div class='value'>{fmt_inr(total_gain)} ({overall_gain_pct:.2f}%)</div></div>",
-            unsafe_allow_html=True,
-        )
-    with c4:
-        if not np.isnan(blended_xirr):
-            st.markdown(
-                f"<div class='metric-card'><h3>Blended XIRR</h3>"
-                f"<div class='value'>{blended_xirr:.2f}%</div></div>",
-                unsafe_allow_html=True,
-            )
+        if not pd.isna(pnl_pct):
+            st.metric("Total P&L", f"₹{total_pnl:,.0f}", f"{pnl_pct:.1f}%")
         else:
-            st.markdown(
-                "<div class='metric-card'><h3>Blended XIRR</h3>"
-                "<div class='value'>N/A</div><div class='sub'>XIRR not available in file</div></div>",
-                unsafe_allow_html=True,
-            )
+            st.metric("Total P&L", f"₹{total_pnl:,.0f}")
+    with c4:
+        if not pd.isna(portfolio_xirr):
+            st.metric("Portfolio XIRR (approx)", f"{portfolio_xirr:.1f}% p.a.")
+        else:
+            st.metric("Portfolio XIRR (approx)", "N/A")
 
-    snap_data = [
-        {"Metric": "Total Invested", "Value": fmt_inr(total_invested)},
-        {"Metric": "Current Value", "Value": fmt_inr(total_current)},
-        {"Metric": "Total Gain", "Value": f"{fmt_inr(total_gain)} ({overall_gain_pct:.2f}%)"},
-        {"Metric": "Blended XIRR", "Value": f"{blended_xirr:.2f}%" if not np.isnan(blended_xirr) else "N/A"},
-    ]
-    snap_df = pd.DataFrame(snap_data)
-    st.markdown(snap_df.to_html(classes="dark-table", index=False, escape=False), unsafe_allow_html=True)
 
-    # -------------- Category allocation -------------- #
-    st.markdown("### 🧩 Category Allocation (by Current Value)")
-    cat_alloc = df.groupby("Category", as_index=False)["Current (₹)"].sum()
-    cat_alloc["Allocation (%)"] = np.where(
-        total_current > 0, cat_alloc["Current (₹)"] / total_current * 100.0, 0.0
-    )
-    cat_alloc = cat_alloc.sort_values("Allocation (%)", ascending=False)
-    st.dataframe(cat_alloc, use_container_width=True, hide_index=True)
+def show_bucket_tables(df_norm: pd.DataFrame):
+    st.markdown("### 🧠 AI Buckets & Plans (Sub Category hidden)")
 
-    # -------------- 2045 / 2040 / 2035 Plan View -------------- #
-    st.markdown("### 📅 2045 / 2040 / 2035 Plan View (Bucket → Year)")
-
-    plan_info = [
-        (2045, "Super Core – Retirement & ultra-long term core"),
-        (2040, "Core – 10–15 year wealth compounding"),
-        (2035, "Satellite – Aggressive 5–10 year bets"),
-        (2030, "Weak – Shorter term review / clean-up zone"),
-        (2026, "Exit – Gradual exit / switch zone"),
-    ]
-
-    plan_cols = [
+    # Display columns: Recommendation second column, no Sub Category
+    display_cols = [
         "Scheme Name",
+        "Recommendation",
         "Category",
-        "Sub Category",
-        "Bucket",
-        "Invested (₹)",
-        "Current (₹)",
-        "Gain (₹)",
-        "Gain (%)",
-        "Allocation (%)",
-        "XIRR (%)",
-        "Suggested Horizon",
-    ]
-
-    for year, desc in plan_info:
-        sub = df[df["Target Year"] == year]
-        if sub.empty:
-            continue
-        st.markdown(f"#### 🎯 {year} Bucket — {desc}")
-        st.dataframe(
-            sub[plan_cols].sort_values("Allocation (%)", ascending=False),
-            use_container_width=True,
-            hide_index=True,
-        )
-
-    # -------------- Buckets -------------- #
-    st.markdown("### 🤖 AI Buckets – Super Core / Core / Satellite / Weak / Exit")
-
-    base_cols = [
-        "Scheme Name",
-        "Category",
-        "Sub Category",
-        "Invested (₹)",
-        "Current (₹)",
-        "Gain (₹)",
-        "Gain (%)",
-        "Allocation (%)",
-        "XIRR (%)",
-        "3Y Return (%)",
-        "5Y Return (%)",
-        "Risk",
-        "Bucket Reason",
-        "Suggested Horizon",
         "Target Year",
+        "Bucket",
+        "Suggested Horizon",
+        "Invested (₹)",
+        "Current Value (₹)",
+        "P&L (₹)",
+        "P&L (%)",
+        "XIRR (%)",
+        "Dividend Yield (%)",
+        "Bucket Reason",
     ]
+    display_cols = [c for c in display_cols if c in df_norm.columns]
 
-    bucket_info = [
-        ("Super Core", "🌟 20+ year core compounding funds"),
-        ("Core", "✅ Main 10–15 year growth funds"),
-        ("Satellite", "🚀 Aggressive 5–10 year satellite bets"),
-        ("Weak", "⚠️ Underperformers; keep under review"),
-        ("Exit", "❌ Likely exit / switch candidates"),
+    # Super Core + Core table
+    st.subheader("🏛 Core Portfolio (Super Core + Core)")
+    core = df_norm[df_norm["Bucket"].isin(["Super Core", "Core"])]
+    if core.empty:
+        st.info("No Super Core / Core funds detected yet.")
+    else:
+        df_show = core[display_cols].copy()
+        st.dataframe(df_show, use_container_width=True, hide_index=True)
+
+    st.subheader("🚀 Satellite & Thematic Bets")
+    sat = df_norm[df_norm["Bucket"] == "Satellite"]
+    if sat.empty:
+        st.info("No Satellite funds detected.")
+    else:
+        df_show = sat[display_cols].copy()
+        st.dataframe(df_show, use_container_width=True, hide_index=True)
+
+    st.subheader("🧊 Medium / Weak / Exit (Review Zone)")
+    rev = df_norm[df_norm["Bucket"].isin(["Medium", "Weak", "Exit"])]
+    if rev.empty:
+        st.info("No Medium / Weak / Exit funds detected.")
+    else:
+        df_show = rev[display_cols].copy()
+        st.dataframe(df_show, use_container_width=True, hide_index=True)
+
+
+def show_category_allocation(df_norm: pd.DataFrame):
+    st.markdown("### 🧩 Category Allocation (by Current Value)")
+    if "Category" not in df_norm.columns:
+        st.info("Category column not present.")
+        return
+    total = df_norm["Current Value (₹)"].sum()
+    if total <= 0:
+        st.info("No non-zero current value for allocation.")
+        return
+
+    grp = (
+        df_norm.groupby("Category")["Current Value (₹)"]
+        .sum()
+        .reset_index()
+        .sort_values("Current Value (₹)", ascending=False)
+    )
+    grp["Weight (%)"] = (grp["Current Value (₹)"] / total * 100.0).round(1)
+
+    st.dataframe(grp, use_container_width=True, hide_index=True)
+
+
+def show_full_table(df_norm: pd.DataFrame):
+    st.markdown("### 📋 Full Normalised Table (Sub Category hidden)")
+
+    display_cols = [
+        "Scheme Name",
+        "Recommendation",
+        "Category",
+        "Target Year",
+        "Bucket",
+        "Suggested Horizon",
+        "Invested (₹)",
+        "Current Value (₹)",
+        "P&L (₹)",
+        "P&L (%)",
+        "XIRR (%)",
+        "Dividend Yield (%)",
+        "Bucket Reason",
+        "AI Score",
     ]
+    display_cols = [c for c in display_cols if c in df_norm.columns]
 
-    for bucket, desc in bucket_info:
-        sub = df[df["Bucket"] == bucket]
-        if sub.empty:
-            continue
-        st.markdown(f"#### {bucket} — {desc}")
-        st.dataframe(
-            sub[base_cols].sort_values("Allocation (%)", ascending=False),
-            use_container_width=True,
-            hide_index=True,
+    df_show = df_norm[display_cols].copy()
+    st.dataframe(df_show, use_container_width=True, hide_index=True)
+
+
+def show_top10_scanner(df_norm: Optional[pd.DataFrame]):
+    st.markdown("### 🏆 Top 10 Mutual Funds (AI Scanner on Your Portfolio)")
+    if df_norm is None or df_norm.empty:
+        st.info("Upload your portfolio file in the main section to see AI-ranked Top 10 funds from your holdings.")
+        return
+
+    # Top 10 by AI Score, but favour Super Core / Core / Satellite
+    bucket_weight = {"Super Core": 3, "Core": 2, "Satellite": 1, "Medium": 0, "Weak": -1, "Exit": -2}
+    df = df_norm.copy()
+    df["bucket_weight"] = df["Bucket"].map(bucket_weight).fillna(0)
+    df["scanner_score"] = df["AI Score"] + df["bucket_weight"] * 3.0
+    df = df.sort_values("scanner_score", ascending=False).head(10)
+
+    display_cols = [
+        "Scheme Name",
+        "Recommendation",  # second column
+        "Bucket",
+        "Target Year",
+        "XIRR (%)",
+        "P&L (%)",
+        "AI Score",
+        "Category",
+        "Suggested Horizon",
+        "Invested (₹)",
+        "Current Value (₹)",
+    ]
+    display_cols = [c for c in display_cols if c in df.columns]
+
+    st.dataframe(df[display_cols], use_container_width=True, hide_index=True)
+
+    st.caption("⚠️ This scanner ranks funds *within your portfolio* based on AI-style scoring: XIRR, P&L, category type and long-term role (core vs satellite).")
+
+
+def show_nfo_tab():
+    st.markdown("### 🆕 New Fund Offers (NFO)")
+
+    df_nfo = fetch_nfo_data()
+    if df_nfo is not None and not df_nfo.empty:
+        st.info("Live NFO list fetched from public MF sites (AMFI / ValueResearch style).")
+        st.dataframe(df_nfo.head(30), use_container_width=True, hide_index=True)
+    else:
+        st.warning("Could not automatically fetch NFO data right now.")
+        st.markdown(
+            """
+You can check the latest New Fund Offers here:
+
+- AMFI NFO list  
+- ValueResearch New Fund Offers  
+- 5paisa / ICICIDirect NFO pages  
+
+(Links intentionally not clickable here to keep the app lightweight.)
+"""
         )
 
-    # Manual Telegram send
-    st.markdown("---")
-    if st.button("📤 Send Telegram Recommendations Now"):
-        now = datetime.now(IST)
-        resp = send_scheduled_recommendations(df, now)
-        st.json(resp)
 
-    # Raw table at end
-    with st.expander("📋 Full Normalised Table"):
-        st.dataframe(df, use_container_width=True, hide_index=True)
+# ==========================
+# Main App
+# ==========================
 
-    # Finally, check for scheduled notifications
-    handle_scheduled_notifications(df)
+def main():
+    render_sidebar()
+
+    st.markdown(
+        """
+    <div style="padding:16px;border-radius:16px;background:linear-gradient(120deg,#4f46e5,#0ea5e9);color:white;margin-bottom:12px;">
+        <h2 style="margin:0 0 6px 0;">💹 AI Mutual Fund Analysis Bot</h2>
+        <p style="margin:0;font-size:0.9rem;">
+            Upload your MF portfolio • Get AI-based buckets & horizon • Auto Telegram recommendations • NFO watcher
+        </p>
+    </div>
+    """,
+        unsafe_allow_html=True,
+    )
+
+    st.markdown("### 📁 Upload Mutual Fund Portfolio")
+
+    uploaded = st.file_uploader("Upload portfolio export (CSV / Excel)", type=["csv", "xls", "xlsx"])
+    df_raw = None
+    df_norm = None
+
+    if uploaded is not None:
+        df_raw = load_portfolio_file(uploaded)
+        if df_raw is not None and not df_raw.empty:
+            st.markdown("#### 🔍 Raw Preview (first 10 rows)")
+            st.dataframe(df_raw.head(10), use_container_width=True, hide_index=True)
+
+            mapping = auto_map_columns(df_raw)
+            if mapping.get("scheme") is not None:
+                df_norm = build_normalised_df(df_raw, mapping)
+            else:
+                st.stop()
+        else:
+            st.stop()
+
+    # Tabs always visible; behaviour depends on whether df_norm is ready
+    tab1, tab2, tab3 = st.tabs(["📊 Portfolio Overview", "🏆 AI Top 10 Scanner", "🆕 NFO Radar"])
+
+    with tab1:
+        if df_norm is None or df_norm.empty:
+            st.info("Upload your mutual fund portfolio file above to see detailed AI analysis here.")
+        else:
+            portfolio_snapshot(df_norm)
+            st.markdown("---")
+            show_bucket_tables(df_norm)
+            st.markdown("---")
+            show_category_allocation(df_norm)
+            st.markdown("---")
+            show_full_table(df_norm)
+
+    with tab2:
+        show_top10_scanner(df_norm)
+
+    with tab3:
+        show_nfo_tab()
+
+    # Telegram: manual send
+    if df_norm is not None and st.session_state.get("send_now_flag", False):
+        msg = generate_telegram_reco_text(df_norm)
+        if msg:
+            resp = send_telegram_message(msg)
+            if resp.get("ok"):
+                st.success("Telegram recommendations sent successfully.")
+            else:
+                st.error(f"Telegram error: {resp}")
+        else:
+            st.info("Nothing to send yet (no bucketed funds).")
+        st.session_state["send_now_flag"] = False
+
+    # Auto scheduled notifications (needs portfolio)
+    if df_norm is not None:
+        handle_scheduled_notifications(df_norm)
 
 
 if __name__ == "__main__":
