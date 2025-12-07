@@ -392,7 +392,7 @@ def enhance_xirr_with_online_data(df_norm: pd.DataFrame) -> pd.DataFrame:
     if "XIRR (%)" not in df_norm.columns:
         df_norm["XIRR (%)"] = np.nan
 
-    needs_idx = df_norm.index[df_norm["XIRR (%)"].isna()].tolist()
+    needs_idx = df_norm.index[df_norm["XIRR (%)"]].isna().tolist() if "XIRR (%)" in df_norm.columns else []
     if needs_idx:
         st.info("🔍 Fetching XIRR online from mfapi.in for schemes missing XIRR (approximate CAGR-style XIRR).")
         cache: Dict[str, Optional[float]] = {}
@@ -793,13 +793,11 @@ def build_simple_ai_table(df: pd.DataFrame) -> pd.DataFrame:
         bucket = r.get("Bucket", "")
         horizon_text = r.get("Suggested Horizon", "")
         if not horizon_text:
-            # fallback from bucket
             _, horizon_text = target_year_and_horizon(bucket)
 
-        # Use Current Value as deployable capital
+        # Use Current Value as deployable capital (treated as "Total Investment" for future)
         curr_val = float(r.get("Current Value (₹)", 0.0) or 0.0)
 
-        # Horizon in years from bucket
         years = horizon_years_from_bucket(bucket)
         rate = (xirr if not pd.isna(xirr) else 8.0) / 100.0
 
@@ -820,11 +818,11 @@ def build_simple_ai_table(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def show_keep_table(df_norm: pd.DataFrame):
-    st.markdown("### ✅ Keep / Hold (Super Core, Core, Satellite, Medium)")
+    st.markdown("### ✅ Keep (Core Portfolio)")
 
-    keep_df = df_norm[df_norm["Bucket"].isin(["Super Core", "Core", "Satellite", "Medium"])]
+    keep_df = df_norm[df_norm["Bucket"].isin(["Super Core", "Core"])]
     if keep_df.empty:
-        st.info("No funds classified as Keep / Hold yet.")
+        st.info("No funds classified as Keep (Super Core/Core) yet.")
         return
 
     simple = build_simple_ai_table(keep_df)
@@ -832,19 +830,31 @@ def show_keep_table(df_norm: pd.DataFrame):
 
 
 def show_sell_table(df_norm: pd.DataFrame):
-    st.markdown("### ⚠️ Sell / Review (Weak + Exit)")
+    st.markdown("### ⚠️ Sell / Exit Review")
 
     sell_df = df_norm[df_norm["Bucket"].isin(["Weak", "Exit"])]
     if sell_df.empty:
-        st.info("No funds in Sell / Review bucket. Good going! 😄")
+        st.info("No funds in Sell / Exit bucket. Good going! 😄")
         return
 
     simple = build_simple_ai_table(sell_df)
     st.dataframe(simple, use_container_width=True, hide_index=True)
 
 
+def show_hold_table(df_norm: pd.DataFrame):
+    st.markdown("### 🟡 Hold / Satellite")
+
+    hold_df = df_norm[df_norm["Bucket"].isin(["Satellite", "Medium"])]
+    if hold_df.empty:
+        st.info("No funds in Hold / Satellite bucket.")
+        return
+
+    simple = build_simple_ai_table(hold_df)
+    st.dataframe(simple, use_container_width=True, hide_index=True)
+
+
 def show_full_table(df_norm: pd.DataFrame):
-    st.markdown("### 📋 Full Portfolio (AI View – 5 Columns)")
+    st.markdown("### 📋 Complete Portfolio (AI View – 5 Columns)")
 
     simple = build_simple_ai_table(df_norm)
     if simple.empty:
@@ -871,6 +881,7 @@ def show_top6_max_profit(df_norm: pd.DataFrame):
         st.info("Not enough data to pick Top 6 funds.")
         return
 
+    # Simple 5-column table for Top 6
     simple = build_simple_ai_table(df_sorted)
     st.dataframe(simple, use_container_width=True, hide_index=True)
 
@@ -888,32 +899,38 @@ def show_top6_max_profit(df_norm: pd.DataFrame):
     weights = scores / scores.sum()
     new_xirr = float((df_sorted["XIRR (%)"] * weights).sum())
 
-    years = 20
-    current_future = total_curr * ((1 + current_xirr / 100.0) ** years)
-    new_future = total_curr * ((1 + new_xirr / 100.0) ** years)
+    # Year-by-year table for 20 years (Dec 20xx)
+    start_year = datetime.now(IST).year + 1
+    years = list(range(start_year, start_year + 20))
 
-    rows = [
-        {
-            "Scenario": "Current Portfolio",
-            "Assumed XIRR": f"{current_xirr:.1f}%",
-            "Current Value": format_inr_compact(total_curr),
-            "Value after 20 yrs": format_inr_compact(current_future),
-        },
-        {
-            "Scenario": "Move all to Top 6",
-            "Assumed XIRR": f"{new_xirr:.1f}%",
-            "Current Value": format_inr_compact(total_curr),
-            "Value after 20 yrs": format_inr_compact(new_future),
-        },
-    ]
+    rows = []
+    for yr in years:
+        n = yr - datetime.now(IST).year
+        # current portfolio projection
+        fv_current = total_curr * ((1 + current_xirr / 100.0) ** n)
+        # all-in top6 projection
+        fv_top6 = total_curr * ((1 + new_xirr / 100.0) ** n)
+        diff = fv_top6 - fv_current
 
-    df_comp = pd.DataFrame(rows)
-    st.markdown("#### 📈 Estimated Portfolio Value if You Move Entire Amount to Top 6 Funds")
+        rows.append(
+            {
+                "Year": f"Dec {yr}",
+                "Current Portfolio": format_inr_compact(fv_current),
+                "Move All to Top 6": format_inr_compact(fv_top6),
+                "Difference": format_inr_compact(diff),
+            }
+        )
+
+    df_yearly = pd.DataFrame(rows)
+    st.markdown("#### 📈 Year-by-Year Projection (if entire portfolio moved to Top 6)")
     st.markdown(
-        df_comp.to_html(classes="dark-table", index=False, escape=False),
+        df_yearly.to_html(classes="dark-table", index=False, escape=False),
         unsafe_allow_html=True,
     )
-    st.caption("This is a rough AI-style scenario comparison based purely on XIRR and AI scores, not financial advice.")
+    st.caption(
+        f"Current portfolio XIRR ≈ {current_xirr:.1f}% p.a. • Top 6 blended XIRR ≈ {new_xirr:.1f}% p.a. "
+        "This is a rough AI scenario – not financial advice."
+    )
 
 
 # ==========================
@@ -944,7 +961,6 @@ def main():
     if uploaded is not None:
         df_raw = load_portfolio_file(uploaded)
         if df_raw is not None and not df_raw.empty:
-            # 🔥 Raw preview removed as requested
             mapping = auto_map_columns(df_raw)
             if mapping.get("scheme") is not None:
                 df_norm = build_normalised_df(df_raw, mapping)
@@ -953,13 +969,17 @@ def main():
         else:
             st.stop()
 
-    # Only 2 tabs now: Portfolio + AI Recommendations
-    tab1, tab2 = st.tabs([
-        "📊 Portfolio Overview",
-        "🤖 AI Recommendations",
+    # Tabs: Overview + 4 AI tabs
+    tab_overview, tab_keep, tab_sell, tab_hold, tab_full, tab_top6 = st.tabs([
+        "📊 Overview",
+        "✅ Keep",
+        "⚠️ Sell",
+        "🟡 Hold",
+        "📋 Complete Portfolio",
+        "💰 Top 6",
     ])
 
-    with tab1:
+    with tab_overview:
         if df_norm is None or df_norm.empty:
             st.info("Upload your mutual fund portfolio file above to see present and future portfolio value here.")
         else:
@@ -968,20 +988,34 @@ def main():
             st.markdown("---")
             show_category_allocation(df_norm)
 
-    with tab2:
+    with tab_keep:
         if df_norm is None or df_norm.empty:
-            st.info("Upload your portfolio to see AI-based recommendations and simplified tables.")
+            st.info("Upload your portfolio to see Keep recommendations.")
         else:
-            st.markdown("#### ✅ Keep / Hold")
             show_keep_table(df_norm)
-            st.markdown("---")
-            st.markdown("#### ⚠️ Sell / Review")
+
+    with tab_sell:
+        if df_norm is None or df_norm.empty:
+            st.info("Upload your portfolio to see Sell/Exit recommendations.")
+        else:
             show_sell_table(df_norm)
-            st.markmarkdown("---")
-            st.markdown("#### 📋 Full Portfolio (5-column AI view)")
+
+    with tab_hold:
+        if df_norm is None or df_norm.empty:
+            st.info("Upload your portfolio to see Hold/Satellite recommendations.")
+        else:
+            show_hold_table(df_norm)
+
+    with tab_full:
+        if df_norm is None or df_norm.empty:
+            st.info("Upload your portfolio to see full AI 5-column view.")
+        else:
             show_full_table(df_norm)
-            st.markdown("---")
-            st.markdown("#### 💰 Top 6 for Maximum Profits")
+
+    with tab_top6:
+        if df_norm is None or df_norm.empty:
+            st.info("Upload your portfolio to see Top 6 and projections.")
+        else:
             show_top6_max_profit(df_norm)
 
     # Telegram: manual send
