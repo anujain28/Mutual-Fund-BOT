@@ -111,6 +111,42 @@ for key, default in [
 
 
 # ==========================
+# Helper: Compact INR Formatting
+# ==========================
+
+def format_inr_compact(x: float) -> str:
+    try:
+        if x is None or (isinstance(x, float) and np.isnan(x)):
+            return "₹0"
+        sign = "-" if x < 0 else ""
+        x = abs(float(x))
+    except Exception:
+        return "₹0"
+
+    if x >= 1e7:  # 1 Cr
+        val = x / 1e7
+        unit = "Cr"
+    elif x >= 1e5:  # 1 Lakh
+        val = x / 1e5
+        unit = "L"
+    elif x >= 1e3:  # 1 Thousand
+        val = x / 1e3
+        unit = "K"
+    else:
+        val = x
+        unit = ""
+
+    if val >= 100:
+        s = f"{val:,.0f}"
+    elif val >= 10:
+        s = f"{val:,.1f}"
+    else:
+        s = f"{val:,.2f}"
+
+    return f"{sign}₹{s}{(' ' + unit) if unit else ''}"
+
+
+# ==========================
 # Telegram Helpers
 # ==========================
 
@@ -628,6 +664,23 @@ def build_normalised_df(df_raw: pd.DataFrame, mapping: Dict[str, Optional[str]])
 
 
 # ==========================
+# Portfolio XIRR Helper
+# ==========================
+
+def calc_portfolio_xirr(df_norm: pd.DataFrame) -> float:
+    total_inv = float(df_norm["Invested (₹)"].sum())
+    if "XIRR (%)" not in df_norm.columns or df_norm["XIRR (%)"].isna().all():
+        return 8.0
+    xirr_series = df_norm["XIRR (%)"].fillna(8.0)
+    if total_inv > 0:
+        weights = df_norm["Invested (₹)"]
+        if weights.sum() > 0:
+            weights = weights / weights.sum()
+            return float((xirr_series * weights).sum())
+    return 8.0
+
+
+# ==========================
 # Display Helpers
 # ==========================
 
@@ -637,20 +690,7 @@ def portfolio_snapshot(df_norm: pd.DataFrame):
     total_pnl = total_curr - total_inv
     pnl_pct = (total_pnl / total_inv * 100.0) if total_inv > 0 else np.nan
 
-    # Weighted XIRR (approx). If missing, assume 8%.
-    if "XIRR (%)" in df_norm.columns and not df_norm["XIRR (%)"].isna().all():
-        xirr_series = df_norm["XIRR (%)"].fillna(8.0)
-        if total_inv > 0:
-            weights = df_norm["Invested (₹)"]
-            if weights.sum() > 0:
-                weights = weights / weights.sum()
-                portfolio_xirr = float((xirr_series * weights).sum())
-            else:
-                portfolio_xirr = 8.0
-        else:
-            portfolio_xirr = 8.0
-    else:
-        portfolio_xirr = 8.0  # default XIRR if not found anywhere
+    portfolio_xirr = calc_portfolio_xirr(df_norm)
 
     c1, c2, c3, c4 = st.columns(4)
     with c1:
@@ -669,7 +709,7 @@ def portfolio_snapshot(df_norm: pd.DataFrame):
 
 
 def show_projection_table(current_value: float, portfolio_xirr: float):
-    st.markdown("### 🔮 Portfolio Projections (INR)")
+    st.markdown("### 🔮 Portfolio Projections (INR – in K / L / Cr)")
 
     if current_value <= 0:
         st.info("Not enough data to compute projections (current value is 0).")
@@ -688,9 +728,9 @@ def show_projection_table(current_value: float, portfolio_xirr: float):
         rows.append(
             {
                 "Years": y,
-                "Current Value (₹)": f"₹{current_value:,.0f}",
-                "Projected Value (₹)": f"₹{fv:,.0f}",
-                "Gain (₹)": f"₹{gain:,.0f}",
+                "Current Value": format_inr_compact(current_value),
+                "Projected Value": format_inr_compact(fv),
+                "Gain": format_inr_compact(gain),
             }
         )
 
@@ -700,53 +740,6 @@ def show_projection_table(current_value: float, portfolio_xirr: float):
         unsafe_allow_html=True,
     )
     st.caption(f"Projection uses portfolio XIRR ≈ {portfolio_xirr:.1f}% p.a. (if XIRR was missing, 8% was assumed).")
-
-
-def show_bucket_tables(df_norm: pd.DataFrame):
-    st.markdown("### 🧠 AI Buckets & Plans (Sub Category hidden, all values in ₹)")
-
-    # Display columns: Recommendation second column, no Sub Category
-    display_cols = [
-        "Scheme Name",
-        "Recommendation",
-        "Category",
-        "Target Year",
-        "Bucket",
-        "Suggested Horizon",
-        "Invested (₹)",
-        "Current Value (₹)",
-        "P&L (₹)",
-        "P&L (%)",
-        "XIRR (%)",
-        "Dividend Yield (%)",
-        "Bucket Reason",
-    ]
-    display_cols = [c for c in display_cols if c in df_norm.columns]
-
-    # Super Core + Core table
-    st.subheader("🏛 Core Portfolio (Super Core + Core)")
-    core = df_norm[df_norm["Bucket"].isin(["Super Core", "Core"])]
-    if core.empty:
-        st.info("No Super Core / Core funds detected yet.")
-    else:
-        df_show = core[display_cols].copy()
-        st.dataframe(df_show, use_container_width=True, hide_index=True)
-
-    st.subheader("🚀 Satellite & Thematic Bets")
-    sat = df_norm[df_norm["Bucket"] == "Satellite"]
-    if sat.empty:
-        st.info("No Satellite funds detected.")
-    else:
-        df_show = sat[display_cols].copy()
-        st.dataframe(df_show, use_container_width=True, hide_index=True)
-
-    st.subheader("🧊 Medium / Weak / Exit (Review Zone)")
-    rev = df_norm[df_norm["Bucket"].isin(["Medium", "Weak", "Exit"])]
-    if rev.empty:
-        st.info("No Medium / Weak / Exit funds detected.")
-    else:
-        df_show = rev[display_cols].copy()
-        st.dataframe(df_show, use_container_width=True, hide_index=True)
 
 
 def show_category_allocation(df_norm: pd.DataFrame):
@@ -768,6 +761,61 @@ def show_category_allocation(df_norm: pd.DataFrame):
     grp["Weight (%)"] = (grp["Current Value (₹)"] / total * 100.0).round(1)
 
     st.dataframe(grp, use_container_width=True, hide_index=True)
+
+
+def show_keep_table(df_norm: pd.DataFrame):
+    st.markdown("### ✅ Keep / Hold Bucket (Super Core, Core, Satellite, Medium)")
+
+    keep_df = df_norm[df_norm["Bucket"].isin(["Super Core", "Core", "Satellite", "Medium"])]
+    if keep_df.empty:
+        st.info("No funds classified as Keep yet.")
+        return
+
+    display_cols = [
+        "Scheme Name",
+        "Recommendation",
+        "Category",
+        "Bucket",
+        "Target Year",
+        "Suggested Horizon",
+        "Invested (₹)",
+        "Current Value (₹)",
+        "P&L (₹)",
+        "P&L (%)",
+        "XIRR (%)",
+        "Dividend Yield (%)",
+        "AI Score",
+    ]
+    display_cols = [c for c in display_cols if c in keep_df.columns]
+    st.dataframe(keep_df[display_cols], use_container_width=True, hide_index=True)
+
+
+def show_sell_table(df_norm: pd.DataFrame):
+    st.markdown("### ⚠️ Sell / Review Bucket (Weak + Exit)")
+
+    sell_df = df_norm[df_norm["Bucket"].isin(["Weak", "Exit"])]
+    if sell_df.empty:
+        st.info("No funds in Sell / Review bucket. Good going! 😄")
+        return
+
+    display_cols = [
+        "Scheme Name",
+        "Recommendation",
+        "Category",
+        "Bucket",
+        "Target Year",
+        "Suggested Horizon",
+        "Invested (₹)",
+        "Current Value (₹)",
+        "P&L (₹)",
+        "P&L (%)",
+        "XIRR (%)",
+        "Dividend Yield (%)",
+        "Bucket Reason",
+        "AI Score",
+    ]
+    display_cols = [c for c in display_cols if c in sell_df.columns]
+    st.dataframe(sell_df[display_cols], use_container_width=True, hide_index=True)
 
 
 def show_full_table(df_norm: pd.DataFrame):
@@ -793,6 +841,82 @@ def show_full_table(df_norm: pd.DataFrame):
 
     df_show = df_norm[display_cols].copy()
     st.dataframe(df_show, use_container_width=True, hide_index=True)
+
+
+def show_top6_max_profit(df_norm: pd.DataFrame):
+    st.markdown("### 💰 Top 6 Mutual Funds for Maximum Profits (from your portfolio)")
+
+    if df_norm is None or df_norm.empty:
+        st.info("Upload your portfolio to see this view.")
+        return
+
+    df = df_norm.copy()
+    if "XIRR (%)" not in df.columns:
+        st.info("XIRR data not available.")
+        return
+
+    # Sort primarily by XIRR, then AI Score
+    df_sorted = df.sort_values(["XIRR (%)", "AI Score"], ascending=[False, False]).head(6)
+    if df_sorted.empty:
+        st.info("Not enough data to pick Top 6 funds.")
+        return
+
+    display_cols = [
+        "Scheme Name",
+        "Recommendation",
+        "Bucket",
+        "Category",
+        "Target Year",
+        "Suggested Horizon",
+        "XIRR (%)",
+        "P&L (%)",
+        "AI Score",
+        "Invested (₹)",
+        "Current Value (₹)",
+    ]
+    display_cols = [c for c in display_cols if c in df_sorted.columns]
+    st.dataframe(df_sorted[display_cols], use_container_width=True, hide_index=True)
+
+    # Hypothetical scenario: move all current portfolio value into these 6 funds
+    total_curr = float(df_norm["Current Value (₹)"].sum())
+    if total_curr <= 0:
+        st.info("Current value is zero, so scenario comparison is not meaningful.")
+        return
+
+    # Current portfolio XIRR
+    current_xirr = calc_portfolio_xirr(df_norm)
+
+    # New XIRR: weighted by AI Score across Top 6
+    scores = df_sorted["AI Score"].clip(lower=0.1)
+    weights = scores / scores.sum()
+    new_xirr = float((df_sorted["XIRR (%)"] * weights).sum())
+
+    years = 20
+    current_future = total_curr * ((1 + current_xirr / 100.0) ** years)
+    new_future = total_curr * ((1 + new_xirr / 100.0) ** years)
+
+    rows = [
+        {
+            "Scenario": "Current Portfolio",
+            "Assumed XIRR": f"{current_xirr:.1f}%",
+            "Current Value": format_inr_compact(total_curr),
+            "Value after 20 yrs": format_inr_compact(current_future),
+        },
+        {
+            "Scenario": "Move all to Top 6",
+            "Assumed XIRR": f"{new_xirr:.1f}%",
+            "Current Value": format_inr_compact(total_curr),
+            "Value after 20 yrs": format_inr_compact(new_future),
+        },
+    ]
+
+    df_comp = pd.DataFrame(rows)
+    st.markdown("#### 📈 Estimated Portfolio Value if You Move Entire Amount to Top 6 Funds")
+    st.markdown(
+        df_comp.to_html(classes="dark-table", index=False, escape=False),
+        unsafe_allow_html=True,
+    )
+    st.caption("This is a rough, AI-style scenario comparison based purely on XIRR and AI scores, not financial advice.")
 
 
 def show_top10_scanner(df_norm: Optional[pd.DataFrame]):
@@ -880,16 +1004,27 @@ def main():
         else:
             current_val, port_xirr = portfolio_snapshot(df_norm)
             show_projection_table(current_val, port_xirr)
+            st.markdown("---")
+            show_category_allocation(df_norm)
 
     with tab2:
         if df_norm is None or df_norm.empty:
             st.info("Upload your portfolio to see AI-based recommendations, buckets, and detailed tables.")
         else:
-            show_bucket_tables(df_norm)
-            st.markdown("---")
-            show_category_allocation(df_norm)
-            st.markdown("---")
-            show_full_table(df_norm)
+            sub1, sub2, sub3, sub4 = st.tabs([
+                "✅ Keep",
+                "⚠️ Sell / Review",
+                "📋 Full Table",
+                "💰 Top 6 (Max Profit)",
+            ])
+            with sub1:
+                show_keep_table(df_norm)
+            with sub2:
+                show_sell_table(df_norm)
+            with sub3:
+                show_full_table(df_norm)
+            with sub4:
+                show_top6_max_profit(df_norm)
 
     with tab3:
         show_top10_scanner(df_norm)
