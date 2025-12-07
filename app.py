@@ -202,8 +202,8 @@ def render_sidebar():
     st.sidebar.title("⚙️ Settings & Links")
 
     # Stocks app link
-    st.sidebar.markdown("### 🔗 Stocks Analysis")
-    st.sidebar.markdown("[📈](https://airobots.streamlit.app/)")
+    st.sidebar.markdown("### 🔗 Other Tools")
+    st.sidebar.markdown("[📈 Open Stocks Analysis App](https://airobots.streamlit.app/)")
     st.sidebar.markdown("---")
 
     # Load config into state
@@ -628,30 +628,6 @@ def build_normalised_df(df_raw: pd.DataFrame, mapping: Dict[str, Optional[str]])
 
 
 # ==========================
-# NFO Fetch
-# ==========================
-
-def fetch_nfo_data() -> pd.DataFrame:
-    """
-    Try a couple of public pages to get NFO list via read_html.
-    If fails, return empty df and we show links instead.
-    """
-    urls = [
-        "https://www.valueresearchonline.com/funds/new-fund-offers/",
-        "https://www.amfiindia.com/new-fund-offer",
-    ]
-    for url in urls:
-        try:
-            tables = pd.read_html(url)
-            if tables:
-                df = tables[0]
-                return df
-        except Exception:
-            continue
-    return pd.DataFrame()
-
-
-# ==========================
 # Display Helpers
 # ==========================
 
@@ -852,28 +828,6 @@ def show_top10_scanner(df_norm: Optional[pd.DataFrame]):
     st.caption("⚠️ This scanner ranks funds *within your portfolio* based on AI-style scoring: XIRR, P&L, category type and long-term role (core vs satellite). All values are in ₹ where applicable.")
 
 
-def show_nfo_tab():
-    st.markdown("### 🆕 New Fund Offers (NFO)")
-
-    df_nfo = fetch_nfo_data()
-    if df_nfo is not None and not df_nfo.empty:
-        st.info("Live NFO list fetched from public MF sites (AMFI / ValueResearch style).")
-        st.dataframe(df_nfo.head(30), use_container_width=True, hide_index=True)
-    else:
-        st.warning("Could not automatically fetch NFO data right now.")
-        st.markdown(
-            """
-You can check the latest New Fund Offers here (values in ₹ as per their sites):
-
-- AMFI NFO list  
-- ValueResearch New Fund Offers  
-- 5paisa / ICICIDirect NFO pages  
-
-(Links intentionally not clickable here to keep the app lightweight.)
-"""
-        )
-
-
 # ==========================
 # Main App
 # ==========================
@@ -886,7 +840,7 @@ def main():
     <div style="padding:16px;border-radius:16px;background:linear-gradient(120deg,#4f46e5,#0ea5e9);color:white;margin-bottom:12px;">
         <h2 style="margin:0 0 6px 0;">💹 AI Mutual Fund Analysis Bot</h2>
         <p style="margin:0;font-size:0.9rem;">
-            Upload your MF portfolio • Get AI-based buckets & horizon • Auto Telegram recommendations • NFO watcher
+            Upload your MF portfolio • Get AI-based buckets & horizon • Auto Telegram recommendations
         </p>
     </div>
     """,
@@ -914,11 +868,10 @@ def main():
             st.stop()
 
     # Tabs: portfolio = only present + future; recos in separate tab
-    tab1, tab2, tab3, tab4 = st.tabs([
+    tab1, tab2, tab3 = st.tabs([
         "📊 Portfolio Overview",
         "🤖 AI Recommendations",
         "🏆 AI Top 10 Scanner",
-        "🆕 NFO Radar",
     ])
 
     with tab1:
@@ -940,9 +893,6 @@ def main():
 
     with tab3:
         show_top10_scanner(df_norm)
-
-    with tab4:
-        show_nfo_tab()
 
     # Telegram: manual send
     if df_norm is not None and st.session_state.get("send_now_flag", False):
