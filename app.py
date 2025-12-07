@@ -2,6 +2,12 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 from typing import Dict, Optional, List
+from datetime import datetime
+import pytz
+import requests
+import json
+import os
+from pathlib import Path
 
 st.set_page_config(
     page_title="🧠 MF Analysis Bot",
@@ -9,6 +15,54 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
+
+# ------------------------- CONFIG ------------------------- #
+
+CONFIG_FILE = "config.json"
+DEFAULT_CONFIG = {
+    "telegram_bot_token": "",
+    "telegram_chat_id": "",
+    "notify_enabled": False,
+}
+
+def load_config() -> Dict:
+    if not os.path.exists(CONFIG_FILE):
+        return DEFAULT_CONFIG.copy()
+    try:
+        with open(CONFIG_FILE, "r") as f:
+            data = json.load(f)
+        cfg = DEFAULT_CONFIG.copy()
+        cfg.update(data)
+        return cfg
+    except Exception:
+        return DEFAULT_CONFIG.copy()
+
+def save_config_from_state():
+    cfg = {
+        "telegram_bot_token": st.session_state.get("telegram_bot_token", ""),
+        "telegram_chat_id": st.session_state.get("telegram_chat_id", ""),
+        "notify_enabled": st.session_state.get("notify_enabled", False),
+    }
+    try:
+        with open(CONFIG_FILE, "w") as f:
+            json.dump(cfg, f, indent=2)
+    except Exception as e:
+        st.warning(f"Could not save config: {e}")
+
+_cfg = load_config()
+
+# Session state defaults
+for key, default in [
+    ("telegram_bot_token", _cfg.get("telegram_bot_token", "")),
+    ("telegram_chat_id", _cfg.get("telegram_chat_id", "")),
+    ("notify_enabled", _cfg.get("notify_enabled", False)),
+    ("last_reco_notify", {}),  # track per-slot sends
+]:
+    if key not in st.session_state:
+        st.session_state[key] = default
+
+IST = pytz.timezone("Asia/Kolkata")
+NOTIFY_SLOTS = ["09:30", "13:30", "15:00"]
 
 # ------------------------- STYLES ------------------------- #
 st.markdown(
@@ -165,6 +219,93 @@ def to_num(s: pd.Series) -> pd.Series:
     return pd.to_numeric(s, errors="coerce").fillna(0.0)
 
 
+# ------------------------- TELEGRAM HELPERS ------------------------- #
+
+def send_telegram_message(text: str):
+    token = st.session_state.get("telegram_bot_token", "")
+    chat_id = st.session_state.get("telegram_chat_id", "")
+    if not token or not chat_id:
+        return {"ok": False, "error": "Missing Telegram config"}
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
+    try:
+        r = requests.get(url, params={"chat_id": chat_id, "text": text})
+        return r.json()
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+def build_telegram_reco_message(df: pd.DataFrame, now: datetime) -> str:
+    """
+    Build message using buckets & allocation.
+    Shows top 3 funds in each good bucket by allocation.
+    """
+    lines = []
+    lines.append("📊 MF Auto Recommendations")
+    lines.append(f"🕒 {now.strftime('%d-%m-%Y %H:%M')} IST")
+    lines.append("")
+
+    if "Bucket" not in df.columns or "Allocation (%)" not in df.columns:
+        lines.append("No bucketed data available.")
+        return "\n".join(lines)
+
+    buckets_order = ["Super Core", "Core", "Satellite"]
+    for b in buckets_order:
+        sub = df[df["Bucket"] == b].copy()
+        if sub.empty:
+            continue
+        sub = sub.sort_values("Allocation (%)", ascending=False).head(3)
+        lines.append(f"• {b}:")
+        for _, r in sub.iterrows():
+            nm = r["Scheme Name"]
+            alloc = r["Allocation (%)"]
+            xirr = r.get("XIRR (%)", np.nan)
+            horizon = r.get("Suggested Horizon", "")
+            if not np.isnan(xirr):
+                lines.append(f"   - {nm} ({alloc:.1f}% alloc, XIRR {xirr:.1f}%)")
+            else:
+                lines.append(f"   - {nm} ({alloc:.1f}% alloc)")
+            if horizon:
+                lines.append(f"     ↳ Horizon: {horizon}")
+        lines.append("")
+
+    if len(lines) <= 3:
+        lines.append("No strong MF candidates available yet.")
+    lines.append("")
+    lines.append("#MutualFunds #LongTerm #India")
+    return "\n".join(lines)
+
+
+def send_scheduled_recommendations(df: pd.DataFrame, now: datetime):
+    msg = build_telegram_reco_message(df, now)
+    resp = send_telegram_message(msg)
+    st.caption("📤 Telegram MF recommendations sent.")
+    return resp
+
+
+def handle_scheduled_notifications(df: pd.DataFrame):
+    """
+    On each rerun, check if current IST time is inside any notification slot window.
+    Uses st.session_state['last_reco_notify'] to avoid multiple sends for same slot/day.
+    """
+    if not st.session_state.get("notify_enabled", False):
+        return
+
+    now = datetime.now(IST)
+    today_str = now.strftime("%Y-%m-%d")
+    last_map = st.session_state.get("last_reco_notify", {}) or {}
+
+    for slot in NOTIFY_SLOTS:
+        hr, mn = map(int, slot.split(":"))
+        scheduled_dt = now.replace(hour=hr, minute=mn, second=0, microsecond=0)
+        window_start = scheduled_dt
+        window_end = scheduled_dt.replace(minute=scheduled_dt.minute + 5)
+        already_sent_today = last_map.get(slot) == today_str
+
+        if (now >= window_start) and (now <= window_end) and not already_sent_today:
+            send_scheduled_recommendations(df, now)
+            last_map[slot] = today_str
+            st.session_state["last_reco_notify"] = last_map
+
 # ------------------------- MF RULE ENGINE ------------------------- #
 
 
@@ -245,6 +386,37 @@ def main():
         """,
         unsafe_allow_html=True,
     )
+
+    # ---- Sidebar: Telegram configuration ---- #
+    with st.sidebar:
+        st.markdown("### ⚙️ Telegram Notifications")
+        notify_toggle = st.checkbox(
+            "Enable Telegram MF recommendations",
+            value=st.session_state.get("notify_enabled", False),
+            key="notify_enabled_chk",
+        )
+        st.session_state["notify_enabled"] = notify_toggle
+
+        tg_token = st.text_input(
+            "Bot Token",
+            value=st.session_state.get("telegram_bot_token", ""),
+            type="password",
+        )
+        tg_chat = st.text_input(
+            "Chat ID",
+            value=st.session_state.get("telegram_chat_id", ""),
+        )
+        st.session_state["telegram_bot_token"] = tg_token
+        st.session_state["telegram_chat_id"] = tg_chat
+
+        if st.button("💾 Save Telegram Config"):
+            save_config_from_state()
+            st.success("Telegram settings saved to config.json")
+
+        st.caption(
+            "Auto recommendations will be sent at **09:30, 13:30, 15:00 IST** "
+            "whenever this app session is active."
+        )
 
     st.markdown("### 📂 Upload Mutual Fund Portfolio File")
     st.write(
@@ -359,6 +531,16 @@ def main():
     df["Bucket Reason"] = reasons
     df["Suggested Horizon"] = horizons
 
+    # Map buckets → target year (2045, 2040, etc.)
+    bucket_year_map = {
+        "Super Core": 2045,
+        "Core": 2040,
+        "Satellite": 2035,
+        "Weak": 2030,
+        "Exit": 2026,
+    }
+    df["Target Year"] = df["Bucket"].map(bucket_year_map)
+
     # ----------------- Portfolio Snapshot ----------------- #
     st.markdown("### 📈 Portfolio Snapshot")
 
@@ -413,6 +595,42 @@ def main():
     cat_alloc = cat_alloc.sort_values("Allocation (%)", ascending=False)
     st.dataframe(cat_alloc, use_container_width=True, hide_index=True)
 
+    # -------------- 2045 / 2040 / 2035 Plan View -------------- #
+    st.markdown("### 📅 2045 / 2040 / 2035 Plan View (Bucket → Year)")
+
+    plan_info = [
+        (2045, "Super Core – Retirement & ultra-long term core"),
+        (2040, "Core – 10–15 year wealth compounding"),
+        (2035, "Satellite – Aggressive 5–10 year bets"),
+        (2030, "Weak – Shorter term review / clean-up zone"),
+        (2026, "Exit – Gradual exit / switch zone"),
+    ]
+
+    plan_cols = [
+        "Scheme Name",
+        "Category",
+        "Sub Category",
+        "Bucket",
+        "Invested (₹)",
+        "Current (₹)",
+        "Gain (₹)",
+        "Gain (%)",
+        "Allocation (%)",
+        "XIRR (%)",
+        "Suggested Horizon",
+    ]
+
+    for year, desc in plan_info:
+        sub = df[df["Target Year"] == year]
+        if sub.empty:
+            continue
+        st.markdown(f"#### 🎯 {year} Bucket — {desc}")
+        st.dataframe(
+            sub[plan_cols].sort_values("Allocation (%)", ascending=False),
+            use_container_width=True,
+            hide_index=True,
+        )
+
     # -------------- Buckets -------------- #
     st.markdown("### 🤖 AI Buckets – Super Core / Core / Satellite / Weak / Exit")
 
@@ -431,6 +649,7 @@ def main():
         "Risk",
         "Bucket Reason",
         "Suggested Horizon",
+        "Target Year",
     ]
 
     bucket_info = [
@@ -452,9 +671,19 @@ def main():
             hide_index=True,
         )
 
-    # Raw table at end if user wants full export view
+    # Manual Telegram send
+    st.markdown("---")
+    if st.button("📤 Send Telegram Recommendations Now"):
+        now = datetime.now(IST)
+        resp = send_scheduled_recommendations(df, now)
+        st.json(resp)
+
+    # Raw table at end
     with st.expander("📋 Full Normalised Table"):
         st.dataframe(df, use_container_width=True, hide_index=True)
+
+    # Finally, check for scheduled notifications
+    handle_scheduled_notifications(df)
 
 
 if __name__ == "__main__":
