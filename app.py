@@ -396,7 +396,7 @@ def enhance_xirr_with_online_data(df_norm: pd.DataFrame) -> pd.DataFrame:
     needs_idx = df_norm.index[df_norm["XIRR (%)"].isna()].tolist()
 
     if needs_idx:
-        st.info("🔍 Fetching XIRR online from mfapi.in for schemes missing XIRR (approximate CAGR-style XIRR).")
+        st.info("🔍 AI Data Analysis ")
         cache: Dict[str, Optional[float]] = {}
         prog = st.progress(0.0)
         for i, idx in enumerate(needs_idx):
@@ -1039,4 +1039,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
